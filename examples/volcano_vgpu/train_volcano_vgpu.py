@@ -25,7 +25,7 @@ from pathlib import Path
 
 from clearml import Logger, OutputModel, Task
 
-from vgpu import connect_vgpu
+from vgpu import add_remote_repo_args, apply_standalone_preflight, connect_vgpu, prepare_remote_repo
 
 # 必须在 Task.init 之前; pin cu124 兼容版本, 避免 agent 自动安装 torch 2.12
 Task.add_requirements(str(Path(__file__).with_name("requirements-remote.txt")))
@@ -63,6 +63,7 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="可选: 预装依赖的 GPU 镜像, 设置后会跳过 pip 安装 (需配合 set_packages)",
     )
+    add_remote_repo_args(parser)
     return parser.parse_args()
 
 
@@ -98,6 +99,8 @@ def train_one_epoch(
 def main() -> None:
     args = parse_args()
 
+    apply_standalone_preflight(args)
+
     task = Task.init(
         project_name="volcano-vgpu",
         task_name="train-template",
@@ -129,6 +132,7 @@ def main() -> None:
         task.set_packages("")
 
     if args.remote:
+        prepare_remote_repo(task, args)
         task.execute_remotely(queue_name=args.queue, exit_process=True)
 
     # ── 以下仅在集群任务 Pod 内执行 ──

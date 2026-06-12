@@ -7,6 +7,8 @@
     python test_vgpu_per_task.py --memory 2 --cores 30
     python test_vgpu_per_task.py --memory 6 --cores 50
     python test_vgpu_per_task.py --vgpu-number 2 --memory 2 --cores 30
+
+Agent 无 SSH 密钥时用 --standalone (helm 单文件脚本) 或 HTTPS repo URL。
 """
 from __future__ import annotations
 
@@ -17,7 +19,14 @@ from pathlib import Path
 
 from clearml import Task
 
-from vgpu import connect_vgpu, expected_memory_mib, GPU_MEMORY_FACTOR
+from vgpu import (
+    add_remote_repo_args,
+    apply_standalone_preflight,
+    connect_vgpu,
+    expected_memory_mib,
+    GPU_MEMORY_FACTOR,
+    prepare_remote_repo,
+)
 
 Task.add_requirements(str(Path(__file__).with_name("requirements-remote.txt")))
 
@@ -40,6 +49,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="skip torch.cuda.device_count() check (nvidia-smi only)",
     )
+    add_remote_repo_args(p)
     return p.parse_args()
 
 
@@ -94,6 +104,8 @@ def main() -> None:
     args = parse_args()
     failures: list[str] = []
 
+    apply_standalone_preflight(args)
+
     task = Task.init(
         project_name="volcano-vgpu",
         task_name="per-task-vgpu-test",
@@ -107,6 +119,7 @@ def main() -> None:
         vgpu_cores=args.cores,
     )
 
+    prepare_remote_repo(task, args)
     task.execute_remotely(queue_name=args.queue, exit_process=True)
 
     logger = task.get_logger()

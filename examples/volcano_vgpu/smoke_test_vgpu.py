@@ -22,7 +22,14 @@ from pathlib import Path
 
 from clearml import Task
 
-from vgpu import connect_vgpu, expected_memory_mib, GPU_MEMORY_FACTOR
+from vgpu import (
+    add_remote_repo_args,
+    apply_standalone_preflight,
+    connect_vgpu,
+    expected_memory_mib,
+    GPU_MEMORY_FACTOR,
+    prepare_remote_repo,
+)
 
 Task.add_requirements(str(Path(__file__).with_name("requirements-remote.txt")))
 
@@ -49,6 +56,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="skip torch incremental allocation / OOM test",
     )
+    add_remote_repo_args(parser)
     return parser.parse_args()
 
 
@@ -63,6 +71,8 @@ def main() -> None:
     args = parse_args()
     expected_mib = expected_memory_mib(args.vgpu_memory, GPU_MEMORY_FACTOR)
 
+    apply_standalone_preflight(args)
+
     task = Task.init(
         project_name="volcano-vgpu",
         task_name="smoke-test",
@@ -76,6 +86,7 @@ def main() -> None:
         vgpu_cores=args.vgpu_cores,
     )
 
+    prepare_remote_repo(task, args)
     task.execute_remotely(queue_name=args.queue, exit_process=True)
 
     logger = task.get_logger()
