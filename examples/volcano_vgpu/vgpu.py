@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import re
 import warnings
+from pathlib import Path
 from typing import Any, Mapping, Union
 
 from clearml import Task
+from clearml.utilities.proxy_object import running_remotely
 
 VGPU_SECTION = "VGPU"
 # Must match volcano-vgpu-device-plugin --gpu-memory-factor on the GPU nodes.
@@ -84,6 +86,23 @@ def connect_vgpu_from_dict(
 def expected_memory_mib(vgpu_memory: int, memory_factor: int = GPU_MEMORY_FACTOR) -> int:
     """Convert SDK vgpu_memory to expected nvidia-smi memory.total (MiB)."""
     return int(vgpu_memory) * int(memory_factor)
+
+
+def remote_requirements_path(script_file: str) -> str:
+    return str(Path(script_file).resolve().with_name("requirements-remote.txt"))
+
+
+def register_remote_requirements(script_file: str) -> str:
+    """Call before ``Task.init``; returns path to requirements-remote.txt."""
+    path = remote_requirements_path(script_file)
+    Task.add_requirements(path)
+    return path
+
+
+def pin_remote_packages(task: Task, script_file: str) -> None:
+    """Overwrite Task pip requirements so agent does not install bogus local pins (e.g. numpy==2.4.6)."""
+    if not running_remotely():
+        task.set_packages(remote_requirements_path(script_file))
 
 
 def ssh_repo_to_https(url: str) -> str:

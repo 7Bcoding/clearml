@@ -25,10 +25,9 @@ from pathlib import Path
 
 from clearml import Logger, OutputModel, Task
 
-from vgpu import add_remote_repo_args, apply_standalone_preflight, connect_vgpu, prepare_remote_repo
+from vgpu import add_remote_repo_args, apply_standalone_preflight, connect_vgpu, pin_remote_packages, prepare_remote_repo, register_remote_requirements
 
-# 必须在 Task.init 之前; pin cu124 兼容版本, 避免 agent 自动安装 torch 2.12
-Task.add_requirements(str(Path(__file__).with_name("requirements-remote.txt")))
+register_remote_requirements(__file__)
 
 DEFAULT_QUEUE = "volcano-queue"
 
@@ -130,6 +129,8 @@ def main() -> None:
     if args.docker_image:
         task.set_base_docker(args.docker_image)
         task.set_packages("")
+    elif args.remote:
+        pin_remote_packages(task, __file__)
 
     if args.remote:
         prepare_remote_repo(task, args)

@@ -1,3 +1,6 @@
+# Pinned for Python 3.10 + CUDA 12.4 task pods (nvidia/cuda:12.4.1-runtime-ubuntu22.04).
+# Agent uses --extra-index-url https://download.pytorch.org/whl/cu124 for torch.*
 clearml==2.1.8
+numpy==2.2.6
 torch==2.5.1
 torchvision==0.20.1

@@ -25,10 +25,12 @@ from vgpu import (
     connect_vgpu,
     expected_memory_mib,
     GPU_MEMORY_FACTOR,
+    pin_remote_packages,
     prepare_remote_repo,
+    register_remote_requirements,
 )
 
-Task.add_requirements(str(Path(__file__).with_name("requirements-remote.txt")))
+register_remote_requirements(__file__)
 
 MEMORY_TOLERANCE = 0.15
 
@@ -110,6 +112,7 @@ def main() -> None:
         project_name="volcano-vgpu",
         task_name="per-task-vgpu-test",
         task_type=Task.TaskTypes.testing,
+        auto_connect_frameworks=False,
     )
 
     connect_vgpu(
@@ -119,6 +122,7 @@ def main() -> None:
         vgpu_cores=args.cores,
     )
 
+    pin_remote_packages(task, __file__)
     prepare_remote_repo(task, args)
     task.execute_remotely(queue_name=args.queue, exit_process=True)
 

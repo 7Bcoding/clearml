@@ -18,8 +18,6 @@ import subprocess
 import sys
 import time
 
-from pathlib import Path
-
 from clearml import Task
 
 from vgpu import (
@@ -28,10 +26,12 @@ from vgpu import (
     connect_vgpu,
     expected_memory_mib,
     GPU_MEMORY_FACTOR,
+    pin_remote_packages,
     prepare_remote_repo,
+    register_remote_requirements,
 )
 
-Task.add_requirements(str(Path(__file__).with_name("requirements-remote.txt")))
+register_remote_requirements(__file__)
 
 DEFAULT_QUEUE = "volcano-queue"
 DEFAULT_VGPU_NUMBER = 1
@@ -155,6 +155,7 @@ def main() -> None:
         project_name="volcano-vgpu",
         task_name="smoke-test",
         task_type=Task.TaskTypes.testing,
+        auto_connect_frameworks=False,
     )
 
     connect_vgpu(
@@ -164,6 +165,7 @@ def main() -> None:
         vgpu_cores=args.vgpu_cores,
     )
 
+    pin_remote_packages(task, __file__)
     prepare_remote_repo(task, args)
     task.flush(wait_for_uploads=True)
     task.execute_remotely(queue_name=args.queue, exit_process=True)
