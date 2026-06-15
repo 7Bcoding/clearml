@@ -5,7 +5,7 @@ ClearML + Volcano vGPU 标准远程训练模板
 
 适用环境: 自建 ClearML Server + K8s Glue Agent + Volcano/HAMi vGPU
 
-本地提交 (开发机需能访问 ClearML API, 且已配置 ~/clearml.conf):
+本地提交 (--remote) 只需安装 clearml; torch 在集群任务 Pod 内由 agent pip 安装。
     python train_volcano_vgpu.py --remote --vgpu-memory 2 --vgpu-cores 30
     python train_volcano_vgpu.py --remote --epochs 20 --lr 3e-4
 
@@ -16,12 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
-
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
-
-from pathlib import Path
+from typing import Any
 
 from clearml import Logger, OutputModel, Task
 
@@ -32,7 +27,9 @@ register_remote_requirements(__file__)
 DEFAULT_QUEUE = "volcano-queue"
 
 
-def build_model(num_features: int = 784, hidden: int = 256, num_classes: int = 10) -> nn.Module:
+def build_model(num_features: int = 784, hidden: int = 256, num_classes: int = 10) -> Any:
+    import torch.nn as nn
+
     return nn.Sequential(
         nn.Linear(num_features, hidden),
         nn.ReLU(),
@@ -67,11 +64,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def train_one_epoch(
-    model: nn.Module,
-    loader: DataLoader,
-    optim: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
+    model: Any,
+    loader: Any,
+    optim: Any,
+    criterion: Any,
+    device: Any,
     logger: Logger,
     epoch: int,
     global_step: int,
@@ -95,6 +92,75 @@ def train_one_epoch(
     return avg_loss, global_step
 
 
+def run_training(
+    task: Task,
+    hparams: dict[str, Any],
+    vgpu: dict[str, Any],
+    queue: str,
+) -> None:
+    import torch
+    import torch.nn as nn
+    from torch.utils.data import DataLoader, TensorDataset
+
+    logger = task.get_logger()
+    output_model = OutputModel(task=task, framework="pytorch", name="baseline")
+
+    torch.manual_seed(int(hparams["seed"]))
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.report_text("device=%s, torch=%s" % (device, torch.__version__))
+    print("device=%s, torch=%s" % (device, torch.__version__))
+
+    if device.type == "cuda":
+        print("GPU: %s" % torch.cuda.get_device_name(0))
+
+    num_samples = 2048
+    num_features = 784
+    num_classes = 10
+    x = torch.randn(num_samples, num_features)
+    y = torch.randint(0, num_classes, (num_samples,))
+    loader = DataLoader(
+        TensorDataset(x, y),
+        batch_size=int(hparams["batch_size"]),
+        shuffle=True,
+    )
+
+    model = build_model(
+        num_features=num_features,
+        hidden=int(hparams["hidden"]),
+        num_classes=num_classes,
+    ).to(device)
+    optim = torch.optim.AdamW(
+        model.parameters(),
+        lr=float(hparams["lr"]),
+        weight_decay=float(hparams["weight_decay"]),
+    )
+    criterion = nn.CrossEntropyLoss()
+
+    global_step = 0
+    avg_loss = 0.0
+    for epoch in range(int(hparams["epochs"])):
+        avg_loss, global_step = train_one_epoch(
+            model, loader, optim, criterion, device, logger, epoch, global_step
+        )
+        print("epoch=%s avg_loss=%.4f" % (epoch, avg_loss))
+
+    ckpt_path = os.path.join(os.getcwd(), "model.pt")
+    torch.save(model.state_dict(), ckpt_path)
+    output_model.update_weights(ckpt_path)
+    output_model.update_design(
+        config_dict={
+            "arch": "mlp",
+            **hparams,
+            **vgpu,
+            "queue": queue,
+        }
+    )
+
+    logger.report_single_value("final_epoch_loss", avg_loss)
+    logger.report_text("Training finished.")
+    print("DONE")
+
+
 def main() -> None:
     args = parse_args()
 
@@ -104,7 +170,7 @@ def main() -> None:
         project_name="volcano-vgpu",
         task_name="train-template",
         task_type=Task.TaskTypes.training,
-        auto_connect_frameworks={"pytorch": True},
+        auto_connect_frameworks=False,
     )
 
     hparams = task.connect(
@@ -136,64 +202,7 @@ def main() -> None:
         prepare_remote_repo(task, args)
         task.execute_remotely(queue_name=args.queue, exit_process=True)
 
-    # ── 以下仅在集群任务 Pod 内执行 ──
-    logger = task.get_logger()
-    output_model = OutputModel(task=task, framework="pytorch", name="baseline")
-
-    torch.manual_seed(int(hparams["seed"]))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.report_text(f"device={device}, torch={torch.__version__}")
-    print(f"device={device}, torch={torch.__version__}")
-
-    if device.type == "cuda":
-        print(f"GPU: {torch.cuda.get_device_name(0)}")
-
-    # 示例用合成数据; 实际项目替换为 Dataset / DataLoader
-    num_samples = 2048
-    num_features = 784
-    num_classes = 10
-    x = torch.randn(num_samples, num_features)
-    y = torch.randint(0, num_classes, (num_samples,))
-    loader = DataLoader(
-        TensorDataset(x, y),
-        batch_size=int(hparams["batch_size"]),
-        shuffle=True,
-    )
-
-    model = build_model(
-        num_features=num_features,
-        hidden=int(hparams["hidden"]),
-        num_classes=num_classes,
-    ).to(device)
-    optim = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(hparams["lr"]),
-        weight_decay=float(hparams["weight_decay"]),
-    )
-    criterion = nn.CrossEntropyLoss()
-
-    global_step = 0
-    for epoch in range(int(hparams["epochs"])):
-        avg_loss, global_step = train_one_epoch(
-            model, loader, optim, criterion, device, logger, epoch, global_step
-        )
-        print(f"epoch={epoch} avg_loss={avg_loss:.4f}")
-
-    ckpt_path = os.path.join(os.getcwd(), "model.pt")
-    torch.save(model.state_dict(), ckpt_path)
-    output_model.update_weights(ckpt_path)
-    output_model.update_design(
-        config_dict={
-            "arch": "mlp",
-            **hparams,
-            **vgpu,
-            "queue": args.queue,
-        }
-    )
-
-    logger.report_single_value("final_epoch_loss", avg_loss)
-    logger.report_text("Training finished.")
-    print("DONE")
+    run_training(task, hparams, vgpu, args.queue)
 
 
 if __name__ == "__main__":
