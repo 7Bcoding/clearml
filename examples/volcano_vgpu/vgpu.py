@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping, Union
 
 from clearml import Task
-from clearml.utilities.proxy_object import running_remotely
+from clearml.config import running_remotely
 
 VGPU_SECTION = "VGPU"
 # Must match volcano-vgpu-device-plugin --gpu-memory-factor on the GPU nodes.
