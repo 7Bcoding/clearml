@@ -6,7 +6,7 @@ ClearML + Volcano vGPU 多卡 DDP 训练验证脚本
 单 Pod 内通过 torch.multiprocessing.spawn 启动多进程 DDP (数据并行)。
 每个进程绑定一张 vGPU; 显存上限仍由 per-task vGPU 配额独立限制。
 
-本地提交 (开发机需能访问 ClearML API, 且已配置 ~/clearml.conf):
+本地提交 (--remote) 只需安装 clearml; torch 在集群任务 Pod 内由 agent pip 安装。
     python train_ddp_volcano_vgpu.py --remote --vgpu-number 2 --vgpu-memory 2 --vgpu-cores 30
     python train_ddp_volcano_vgpu.py --remote --epochs 10 --batch-size 64 --hidden 128
 
@@ -17,13 +17,6 @@ from __future__ import annotations
 import argparse
 import os
 from typing import Any
-
-import torch
-import torch.distributed as dist
-import torch.multiprocessing as mp
-import torch.nn as nn
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 
 from clearml import Logger, OutputModel, Task
 
@@ -42,7 +35,9 @@ DEFAULT_QUEUE = "volcano-queue"
 DEFAULT_MASTER_PORT = 29500
 
 
-def build_model(num_features: int = 784, hidden: int = 128, num_classes: int = 10) -> nn.Module:
+def build_model(num_features: int = 784, hidden: int = 128, num_classes: int = 10) -> Any:
+    import torch.nn as nn
+
     return nn.Sequential(
         nn.Linear(num_features, hidden),
         nn.ReLU(),
@@ -78,6 +73,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_ddp(rank: int, world_size: int, master_port: int) -> None:
+    import torch
+    import torch.distributed as dist
+
     os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
     os.environ["MASTER_PORT"] = str(master_port)
     dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
@@ -85,16 +83,18 @@ def setup_ddp(rank: int, world_size: int, master_port: int) -> None:
 
 
 def cleanup_ddp() -> None:
+    import torch.distributed as dist
+
     if dist.is_initialized():
         dist.destroy_process_group()
 
 
 def train_one_epoch(
-    model: DDP,
-    loader: DataLoader,
-    optim: torch.optim.Optimizer,
-    criterion: nn.Module,
-    device: torch.device,
+    model: Any,
+    loader: Any,
+    optim: Any,
+    criterion: Any,
+    device: Any,
     logger: Logger | None,
     epoch: int,
     global_step: int,
@@ -131,6 +131,12 @@ def ddp_worker(
     master_port: int,
     queue: str,
 ) -> None:
+    import torch
+    import torch.distributed as dist
+    import torch.nn as nn
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
+
     setup_ddp(rank, world_size, master_port)
     device = torch.device("cuda", rank)
 
@@ -226,6 +232,9 @@ def run_ddp_training(
     master_port: int,
     queue: str,
 ) -> None:
+    import torch
+    import torch.multiprocessing as mp
+
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required for DDP training")
 
