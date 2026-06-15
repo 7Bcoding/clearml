@@ -52,7 +52,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
     parser.add_argument("--hidden", type=int, default=128, help="隐藏层宽度 (2GB vGPU 建议 <=128)")
+    parser.add_argument("--num-samples", type=int, default=4096, help="合成数据集样本数")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
+    parser.add_argument(
+        "--min-runtime-sec",
+        type=int,
+        default=0,
+        help="最短训练时长(秒); >0 时会循环到达此时长, 便于采集 ClearML 资源监控曲线",
+    )
     parser.add_argument("--queue", default=DEFAULT_QUEUE, help="ClearML 队列")
     parser.add_argument("--vgpu-number", type=int, default=2, help="volcano.sh/vgpu-number / DDP world_size")
     parser.add_argument("--vgpu-memory", type=int, default=2, help="volcano.sh/vgpu-memory (GiB, factor=1024)")
@@ -131,6 +138,8 @@ def ddp_worker(
     master_port: int,
     queue: str,
 ) -> None:
+    import time
+
     import torch
     import torch.distributed as dist
     import torch.nn as nn
@@ -166,7 +175,7 @@ def ddp_worker(
 
     dist.barrier()
 
-    num_samples = 4096
+    num_samples = int(hparams.get("num_samples", 4096))
     num_features = 784
     num_classes = 10
     x = torch.randn(num_samples, num_features)
@@ -194,14 +203,27 @@ def ddp_worker(
     )
     criterion = nn.CrossEntropyLoss()
 
+    epochs = int(hparams["epochs"])
+    min_runtime_sec = int(hparams.get("min_runtime_sec", 0))
+    start_time = time.time()
+
     global_step = 0
     last_avg_loss = 0.0
-    for epoch in range(int(hparams["epochs"])):
+    epoch = 0
+    while True:
         sampler.set_epoch(epoch)
         last_avg_loss, global_step = train_one_epoch(
             model, loader, optim, criterion, device, logger, epoch, global_step, rank
         )
         print("rank=%s epoch=%s avg_loss=%.4f" % (rank, epoch, last_avg_loss))
+        epoch += 1
+
+        # rank 0 decides whether to continue; broadcast keeps all ranks collective-safe.
+        keep_going = 1 if (epoch < epochs or time.time() - start_time < min_runtime_sec) else 0
+        flag = torch.tensor([keep_going], device=device)
+        dist.broadcast(flag, src=0)
+        if flag.item() == 0:
+            break
 
     dist.barrier()
 
@@ -275,7 +297,9 @@ def main() -> None:
             "lr": args.lr,
             "weight_decay": args.weight_decay,
             "hidden": args.hidden,
+            "num_samples": args.num_samples,
             "seed": args.seed,
+            "min_runtime_sec": args.min_runtime_sec,
             "world_size": args.vgpu_number,
             "master_port": args.master_port,
         },
