@@ -40,6 +40,8 @@ DEFAULT_VGPU_CORES = 30
 MEMORY_TOLERANCE = 0.15
 DEFAULT_ALLOC_STEP_MB = 512
 MAX_ALLOC_STEPS = 64
+# PyTorch 2.x + CUDA 12 on vGPU: non-tensor reserve is roughly fixed (~300–512 MiB), not proportional to quota.
+CUDA_FRAMEWORK_RESERVE_MIB = 512
 
 
 def parse_args() -> argparse.Namespace:
@@ -102,12 +104,21 @@ def memory_within_tolerance(actual_mib: float, expected_mib: float) -> bool:
     return abs(actual_mib - expected_mib) <= expected_mib * MEMORY_TOLERANCE
 
 
-def oom_within_tolerance(oom_mib: float, expected_mib: float) -> bool:
-    """OOM may occur slightly below the limit; accept up to ~1 step below expected."""
-    if expected_mib <= 0:
+def oom_within_tolerance(oom_mib: float, expected_mib: float, step_mb: int = DEFAULT_ALLOC_STEP_MB) -> bool:
+    """Check torch OOM landed near the vGPU limit (not at full-card capacity).
+
+    Model (works across quota sizes when ``step_mb`` is reasonable vs ``expected_mib``):
+    - ``memory.total`` ([3/5]) already validates the scheduled quota.
+    - Incremental ``torch.empty`` steps report the last *successful* tensor total before OOM.
+    - CUDA/PyTorch holds a mostly fixed non-tensor reserve on first GPU use.
+    - The next ``step_mb`` chunk fails when ``tensor + reserve > expected``.
+
+    So a healthy OOM is roughly in ``[expected - step - reserve, expected]`` (tensor side).
+    """
+    if expected_mib <= 0 or step_mb <= 0:
         return False
-    lower = expected_mib * (1.0 - MEMORY_TOLERANCE)
-    upper = expected_mib * (1.0 + MEMORY_TOLERANCE) + DEFAULT_ALLOC_STEP_MB
+    lower = max(0.0, expected_mib - step_mb - CUDA_FRAMEWORK_RESERVE_MIB)
+    upper = expected_mib
     return lower <= oom_mib <= upper
 
 
@@ -250,7 +261,7 @@ def main() -> None:
                         "GPU %s: no OOM after %s x %s MiB (limit may not be enforced)"
                         % (gpu_index, MAX_ALLOC_STEPS, args.alloc_step_mb)
                     )
-                elif not oom_within_tolerance(oom_at_mb, expected_mib):
+                elif not oom_within_tolerance(oom_at_mb, expected_mib, args.alloc_step_mb):
                     failures.append(
                         "GPU %s: OOM at %.0f MiB, expected near %s MiB"
                         % (gpu_index, oom_at_mb, expected_mib)
