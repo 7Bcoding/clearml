@@ -1,0 +1,19 @@
+# 训练超参示例 (配合 task.connect_configuration 使用, 见 USAGE_zh.md §4)
+# WebUI 复跑: Clone -> CONFIGURATION -> General -> training -> 编辑 YAML -> Enqueue
+
+training:
+  epochs: 5
+  batch_size: 128
+  lr: 0.001
+  weight_decay: 0.0001
+  hidden: 256
+  seed: 42
+
+# 嵌套结构也支持 (connect_configuration 会整文件跟踪)
+model:
+  arch: mlp
+  num_classes: 10
+
+data:
+  num_samples: 2048
+  num_features: 784

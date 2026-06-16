@@ -1,209 +1,117 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ClearML + Volcano vGPU 标准远程训练模板
+ClearML + Volcano vGPU 单卡训练示例 (官方写法, 较完整)
 
-适用环境: 自建 ClearML Server + K8s Glue Agent + Volcano/HAMi vGPU
+相比 train_template.py, 这里演示更多 ClearML 训练集成:
+  OutputModel / artifact 上传 / 标签 / 最终指标 / (可选) InputModel 预训练权重
+超参默认 argparse; 其他写法见脚本内注释与 USAGE_zh.md §4。
 
-本地提交 (--remote) 只需安装 clearml; torch 在集群任务 Pod 内由 agent pip 安装。
-    python train_volcano_vgpu.py --remote --vgpu-memory 2 --vgpu-cores 30
-    python train_volcano_vgpu.py --remote --epochs 20 --lr 3e-4
-
-平台需启用 agent vgpuHook; SDK 通过 Task.connect(..., name="VGPU") 按任务指定显存/算力。
-WebUI 复跑: Clone -> 修改 CONFIGURATION -> VGPU -> Enqueue
+提交:
+    python train_volcano_vgpu.py
+    python train_volcano_vgpu.py --epochs 20 --lr 3e-4
+WebUI 复跑: Clone -> 改 CONFIGURATION (Args / VGPU) -> Enqueue
 """
-from __future__ import annotations
-
 import argparse
 import os
-from typing import Any
 
-from clearml import Logger, OutputModel, Task
+from clearml import OutputModel, Task
 
-from vgpu import add_remote_repo_args, apply_standalone_preflight, connect_vgpu, pin_remote_packages, prepare_remote_repo, register_remote_requirements
+_REQS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-remote.txt")
+Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
 
-register_remote_requirements(__file__)
+task = Task.init(project_name="volcano-vgpu", task_name="train-single-gpu")
+task.set_tags(["single-gpu", "mlp", "example"])  # WebUI 筛选用
 
-DEFAULT_QUEUE = "volcano-queue"
+# ------------------------------------------------------------------
+# 超参定义 (三选一, 详见 USAGE_zh.md §4)
+# ------------------------------------------------------------------
+# [A] argparse —— 默认
+parser = argparse.ArgumentParser()
+parser.add_argument("--epochs", type=int, default=5)
+parser.add_argument("--batch-size", type=int, default=128)
+parser.add_argument("--lr", type=float, default=1e-3)
+parser.add_argument("--weight-decay", type=float, default=1e-4)
+parser.add_argument("--hidden", type=int, default=256)
+parser.add_argument("--seed", type=int, default=42)
+args = parser.parse_args()
 
+# [B] 纯 dict: 取消注释, 并注释掉上面的 argparse 块
+# hp = task.connect({"epochs": 5, "batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4,
+#                    "hidden": 256, "seed": 42}, name="Training")
+# class _A: pass
+# args = _A(); [setattr(args, k, v) for k, v in hp.items()]
 
-def build_model(num_features: int = 784, hidden: int = 256, num_classes: int = 10) -> Any:
-    import torch.nn as nn
+# [C] YAML: 取消注释, 并注释掉 argparse 块; 参考 config.example.yaml
+# cfg_path = os.path.join(os.path.dirname(__file__), "config.example.yaml")
+# cfg = task.connect_configuration(cfg_path, name="General")
+# hp = cfg["training"]
+# class _A: pass
+# args = _A(); [setattr(args, k, v) for k, v in hp.items()]
 
-    return nn.Sequential(
-        nn.Linear(num_features, hidden),
-        nn.ReLU(),
-        nn.Linear(hidden, num_classes),
-    )
+# 【平台】申请 vGPU (vgpu_memory 单位 GiB)
+task.connect({"vgpu_number": 1, "vgpu_memory": 2, "vgpu_cores": 50}, name="VGPU")
 
+# 可选: 使用预装 torch 的镜像, 省去 Pod 内 pip (见 USAGE_zh.md §5)
+# task.set_base_docker("your-registry/pytorch:2.5.1-cuda12.4-cudnn9-runtime")
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ClearML Volcano vGPU training template")
-    parser.add_argument("--epochs", type=int, default=5, help="训练 epoch 数")
-    parser.add_argument("--batch-size", type=int, default=128, help="batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
-    parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
-    parser.add_argument("--hidden", type=int, default=256, help="隐藏层宽度")
-    parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument("--queue", default=DEFAULT_QUEUE, help="ClearML 队列")
-    parser.add_argument("--vgpu-number", type=int, default=1, help="volcano.sh/vgpu-number")
-    parser.add_argument("--vgpu-memory", type=int, default=2, help="volcano.sh/vgpu-memory (GiB, factor=1024)")
-    parser.add_argument("--vgpu-cores", type=int, default=50, help="volcano.sh/vgpu-cores (0-100)")
-    parser.add_argument(
-        "--remote",
-        action="store_true",
-        help="本地提交后立即入队并退出; 训练在集群任务 Pod 内执行",
-    )
-    parser.add_argument(
-        "--docker-image",
-        default="",
-        help="可选: 预装依赖的 GPU 镜像, 设置后会跳过 pip 安装 (需配合 set_packages)",
-    )
-    add_remote_repo_args(parser)
-    return parser.parse_args()
+task.execute_remotely(queue_name="volcano-queue")  # 本地调试可注释此行
 
+# ============================================================
+# 以下只在集群 Pod 内执行
+# ============================================================
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 
-def train_one_epoch(
-    model: Any,
-    loader: Any,
-    optim: Any,
-    criterion: Any,
-    device: Any,
-    logger: Logger,
-    epoch: int,
-    global_step: int,
-) -> tuple[float, int]:
+logger = task.get_logger()
+output_model = OutputModel(task=task, framework="pytorch", name="baseline")
+
+# 可选: 从 ClearML Model Registry 加载预训练权重 (见 USAGE_zh.md §5)
+# from clearml import InputModel
+# input_model = InputModel(model_id="YOUR_MODEL_ID")  # 或 name="project/model-name"
+# pretrained = input_model.get_weights()
+# logger.report_text("loaded pretrained from %s" % input_model.id)
+
+torch.manual_seed(args.seed)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+logger.report_text("device=%s, torch=%s" % (device, torch.__version__))
+print("device=%s, torch=%s" % (device, torch.__version__))
+if device.type == "cuda":
+    print("GPU: %s" % torch.cuda.get_device_name(0))
+
+# —— 用你的真实 Dataset/DataLoader 替换以下合成数据 ——
+x = torch.randn(2048, 784)
+y = torch.randint(0, 10, (2048,))
+loader = DataLoader(TensorDataset(x, y), batch_size=args.batch_size, shuffle=True)
+
+model = nn.Sequential(nn.Linear(784, args.hidden), nn.ReLU(), nn.Linear(args.hidden, 10)).to(device)
+# if pretrained: model.load_state_dict(torch.load(pretrained, map_location=device))
+optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+criterion = nn.CrossEntropyLoss()
+
+step = 0
+avg_loss = 0.0
+for epoch in range(args.epochs):
     model.train()
-    total_loss = 0.0
-    for batch_x, batch_y in loader:
-        batch_x = batch_x.to(device)
-        batch_y = batch_y.to(device)
+    running = 0.0
+    for bx, by in loader:
+        bx, by = bx.to(device), by.to(device)
         optim.zero_grad(set_to_none=True)
-        loss = criterion(model(batch_x), batch_y)
+        loss = criterion(model(bx), by)
         loss.backward()
         optim.step()
+        running += float(loss.item())
+        logger.report_scalar("train", "loss", float(loss.item()), iteration=step)  # step 级
+        step += 1
+    avg_loss = running / max(len(loader), 1)
+    logger.report_scalar("train", "epoch_loss", avg_loss, iteration=epoch)  # epoch 级
+    print("epoch=%s avg_loss=%.4f" % (epoch, avg_loss))
 
-        total_loss += float(loss.item())
-        logger.report_scalar("train", "loss", float(loss.item()), iteration=global_step)
-        global_step += 1
-
-    avg_loss = total_loss / max(len(loader), 1)
-    logger.report_scalar("train", "epoch_loss", avg_loss, iteration=epoch)
-    return avg_loss, global_step
-
-
-def run_training(
-    task: Task,
-    hparams: dict[str, Any],
-    vgpu: dict[str, Any],
-    queue: str,
-) -> None:
-    import torch
-    import torch.nn as nn
-    from torch.utils.data import DataLoader, TensorDataset
-
-    logger = task.get_logger()
-    output_model = OutputModel(task=task, framework="pytorch", name="baseline")
-
-    torch.manual_seed(int(hparams["seed"]))
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.report_text("device=%s, torch=%s" % (device, torch.__version__))
-    print("device=%s, torch=%s" % (device, torch.__version__))
-
-    if device.type == "cuda":
-        print("GPU: %s" % torch.cuda.get_device_name(0))
-
-    num_samples = 2048
-    num_features = 784
-    num_classes = 10
-    x = torch.randn(num_samples, num_features)
-    y = torch.randint(0, num_classes, (num_samples,))
-    loader = DataLoader(
-        TensorDataset(x, y),
-        batch_size=int(hparams["batch_size"]),
-        shuffle=True,
-    )
-
-    model = build_model(
-        num_features=num_features,
-        hidden=int(hparams["hidden"]),
-        num_classes=num_classes,
-    ).to(device)
-    optim = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(hparams["lr"]),
-        weight_decay=float(hparams["weight_decay"]),
-    )
-    criterion = nn.CrossEntropyLoss()
-
-    global_step = 0
-    avg_loss = 0.0
-    for epoch in range(int(hparams["epochs"])):
-        avg_loss, global_step = train_one_epoch(
-            model, loader, optim, criterion, device, logger, epoch, global_step
-        )
-        print("epoch=%s avg_loss=%.4f" % (epoch, avg_loss))
-
-    ckpt_path = os.path.join(os.getcwd(), "model.pt")
-    torch.save(model.state_dict(), ckpt_path)
-    output_model.update_weights(ckpt_path)
-    output_model.update_design(
-        config_dict={
-            "arch": "mlp",
-            **hparams,
-            **vgpu,
-            "queue": queue,
-        }
-    )
-
-    logger.report_single_value("final_epoch_loss", avg_loss)
-    logger.report_text("Training finished.")
-    print("DONE")
-
-
-def main() -> None:
-    args = parse_args()
-
-    apply_standalone_preflight(args)
-
-    task = Task.init(
-        project_name="volcano-vgpu",
-        task_name="train-template",
-        task_type=Task.TaskTypes.training,
-        auto_connect_frameworks=False,
-    )
-
-    hparams = task.connect(
-        {
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "lr": args.lr,
-            "weight_decay": args.weight_decay,
-            "hidden": args.hidden,
-            "seed": args.seed,
-        },
-        name="Training",
-    )
-
-    vgpu = connect_vgpu(
-        task,
-        vgpu_number=args.vgpu_number,
-        vgpu_memory=args.vgpu_memory,
-        vgpu_cores=args.vgpu_cores,
-    )
-
-    if args.docker_image:
-        task.set_base_docker(args.docker_image)
-        task.set_packages("")
-    elif args.remote:
-        pin_remote_packages(task, __file__)
-
-    if args.remote:
-        prepare_remote_repo(task, args)
-        task.execute_remotely(queue_name=args.queue, exit_process=True)
-
-    run_training(task, hparams, vgpu, args.queue)
-
-
-if __name__ == "__main__":
-    main()
+ckpt_path = os.path.join(os.getcwd(), "model.pt")
+torch.save(model.state_dict(), ckpt_path)
+output_model.update_weights(ckpt_path)  # MODELS 页, 可发布到 Model Registry
+task.upload_artifact("checkpoint", artifact_object=ckpt_path)  # ARTIFACTS 页可下载
+logger.report_single_value("final_epoch_loss", avg_loss)  # 实验列表可排序
+logger.report_text("Training finished.")
+print("DONE")

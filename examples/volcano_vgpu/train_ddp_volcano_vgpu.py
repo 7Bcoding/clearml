@@ -1,143 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ClearML + Volcano vGPU 多卡 DDP 训练验证脚本
+ClearML + Volcano vGPU 多卡 DDP 训练 (MLP, 官方写法)
 
-单 Pod 内通过 torch.multiprocessing.spawn 启动多进程 DDP (数据并行)。
-每个进程绑定一张 vGPU; 显存上限仍由 per-task vGPU 配额独立限制。
+单 Pod 内用 torch.multiprocessing.spawn 起多进程 DDP, 每进程绑定一张 vGPU。
+平台相关只有「依赖声明 + VGPU connect」两处, 其余是标准 ClearML + 标准 DDP。
 
-本地提交 (--remote) 只需安装 clearml; torch 在集群任务 Pod 内由 agent pip 安装。
-    python train_ddp_volcano_vgpu.py --remote --vgpu-number 2 --vgpu-memory 2 --vgpu-cores 30
-    python train_ddp_volcano_vgpu.py --remote --epochs 10 --batch-size 64 --hidden 128
+注意: DDP 用 mp.spawn 必须放在 if __name__ == "__main__" 保护的 main() 里
+(子进程会重新 import 本模块); torch 在 worker 内导入, 故本机提交无需 torch。
 
-WebUI 复跑: Clone -> 修改 CONFIGURATION -> VGPU / Training -> Enqueue
+提交:
+    python train_ddp_volcano_vgpu.py
+    python train_ddp_volcano_vgpu.py --epochs 10 --batch-size 64 --hidden 128
+要点: --batch-size 是每卡 batch (全局=batch×vgpu_number); 仅 rank0 上报 ClearML。
 """
-from __future__ import annotations
-
 import argparse
 import os
-from typing import Any
 
-from clearml import Logger, OutputModel, Task
+from clearml import Task
 
-from vgpu import (
-    add_remote_repo_args,
-    apply_standalone_preflight,
-    connect_vgpu,
-    pin_remote_packages,
-    prepare_remote_repo,
-    register_remote_requirements,
-)
-
-register_remote_requirements(__file__)
-
-DEFAULT_QUEUE = "volcano-queue"
-DEFAULT_MASTER_PORT = 29500
+MASTER_PORT = 29500
+QUEUE = "volcano-queue"
 
 
-def build_model(num_features: int = 784, hidden: int = 128, num_classes: int = 10) -> Any:
-    import torch.nn as nn
-
-    return nn.Sequential(
-        nn.Linear(num_features, hidden),
-        nn.ReLU(),
-        nn.Linear(hidden, num_classes),
-    )
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="ClearML Volcano vGPU DDP training")
-    parser.add_argument("--epochs", type=int, default=5, help="训练 epoch 数")
-    parser.add_argument("--batch-size", type=int, default=64, help="每张 GPU 的 batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="学习率")
-    parser.add_argument("--weight-decay", type=float, default=1e-4, help="AdamW weight decay")
-    parser.add_argument("--hidden", type=int, default=128, help="隐藏层宽度 (2GB vGPU 建议 <=128)")
-    parser.add_argument("--num-samples", type=int, default=4096, help="合成数据集样本数")
-    parser.add_argument("--seed", type=int, default=42, help="随机种子")
-    parser.add_argument(
-        "--min-runtime-sec",
-        type=int,
-        default=0,
-        help="最短训练时长(秒); >0 时会循环到达此时长, 便于采集 ClearML 资源监控曲线",
-    )
-    parser.add_argument("--queue", default=DEFAULT_QUEUE, help="ClearML 队列")
-    parser.add_argument("--vgpu-number", type=int, default=2, help="volcano.sh/vgpu-number / DDP world_size")
-    parser.add_argument("--vgpu-memory", type=int, default=2, help="volcano.sh/vgpu-memory (GiB, factor=1024)")
-    parser.add_argument("--vgpu-cores", type=int, default=30, help="volcano.sh/vgpu-cores (0-100)")
-    parser.add_argument("--master-port", type=int, default=DEFAULT_MASTER_PORT, help="DDP rendezvous 端口")
-    parser.add_argument(
-        "--remote",
-        action="store_true",
-        help="本地提交后立即入队并退出; 训练在集群任务 Pod 内执行",
-    )
-    parser.add_argument(
-        "--docker-image",
-        default="",
-        help="可选: 预装依赖的 GPU 镜像, 设置后会跳过 pip 安装 (需配合 set_packages)",
-    )
-    add_remote_repo_args(parser)
-    return parser.parse_args()
-
-
-def setup_ddp(rank: int, world_size: int, master_port: int) -> None:
-    import torch
-    import torch.distributed as dist
-
-    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-    os.environ["MASTER_PORT"] = str(master_port)
-    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-
-def cleanup_ddp() -> None:
-    import torch.distributed as dist
-
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-
-def train_one_epoch(
-    model: Any,
-    loader: Any,
-    optim: Any,
-    criterion: Any,
-    device: Any,
-    logger: Logger | None,
-    epoch: int,
-    global_step: int,
-    rank: int,
-) -> tuple[float, int]:
-    model.train()
-    total_loss = 0.0
-    for batch_x, batch_y in loader:
-        batch_x = batch_x.to(device, non_blocking=True)
-        batch_y = batch_y.to(device, non_blocking=True)
-        optim.zero_grad(set_to_none=True)
-        loss = criterion(model(batch_x), batch_y)
-        loss.backward()
-        optim.step()
-
-        loss_value = float(loss.item())
-        total_loss += loss_value
-        if rank == 0 and logger is not None:
-            logger.report_scalar("train", "loss", loss_value, iteration=global_step)
-        global_step += 1
-
-    avg_loss = total_loss / max(len(loader), 1)
-    if rank == 0 and logger is not None:
-        logger.report_scalar("train", "epoch_loss", avg_loss, iteration=epoch)
-    return avg_loss, global_step
-
-
-def ddp_worker(
-    rank: int,
-    world_size: int,
-    hparams: dict[str, Any],
-    vgpu: dict[str, Any],
-    task_id: str,
-    master_port: int,
-    queue: str,
-) -> None:
+def ddp_worker(rank, world_size, hp, task_id):
     import time
 
     import torch
@@ -146,190 +32,133 @@ def ddp_worker(
     from torch.nn.parallel import DistributedDataParallel as DDP
     from torch.utils.data import DataLoader, DistributedSampler, TensorDataset
 
-    setup_ddp(rank, world_size, master_port)
+    os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+    os.environ["MASTER_PORT"] = str(MASTER_PORT)
+    dist.init_process_group(backend="nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
+    torch.manual_seed(int(hp["seed"]))
 
-    # Same dataset on every rank; DistributedSampler assigns disjoint shards.
-    torch.manual_seed(int(hparams["seed"]))
-
-    logger: Logger | None = None
-    output_model: OutputModel | None = None
+    logger = None
+    output_model = None
     if rank == 0:
+        from clearml import OutputModel
         task = Task.get_task(task_id=task_id)
         logger = task.get_logger()
         output_model = OutputModel(task=task, framework="pytorch", name="ddp-baseline")
-        logger.report_text(
-            "DDP start: world_size=%s, torch=%s, vgpu=%s"
-            % (world_size, torch.__version__, vgpu)
-        )
-        for idx in range(world_size):
-            props = torch.cuda.get_device_properties(idx)
-            msg = "rank=%s sees cuda:%s name=%s total_mem=%.1fGiB" % (
-                rank,
-                idx,
-                props.name,
-                props.total_memory / (1024**3),
-            )
-            print(msg)
-            logger.report_text(msg)
+        logger.report_text("DDP start: world_size=%s, torch=%s" % (world_size, torch.__version__))
 
     dist.barrier()
 
-    num_samples = int(hparams.get("num_samples", 4096))
-    num_features = 784
-    num_classes = 10
-    x = torch.randn(num_samples, num_features)
-    y = torch.randint(0, num_classes, (num_samples,))
+    # 同一份合成数据, DistributedSampler 切分到各 rank (换成你的真实 Dataset)
+    x = torch.randn(int(hp["num_samples"]), 784)
+    y = torch.randint(0, 10, (int(hp["num_samples"]),))
     dataset = TensorDataset(x, y)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    loader = DataLoader(
-        dataset,
-        batch_size=int(hparams["batch_size"]),
-        sampler=sampler,
-        num_workers=0,
-        pin_memory=True,
-    )
+    loader = DataLoader(dataset, batch_size=int(hp["batch_size"]), sampler=sampler, pin_memory=True)
 
-    model = build_model(
-        num_features=num_features,
-        hidden=int(hparams["hidden"]),
-        num_classes=num_classes,
-    ).to(device)
+    model = nn.Sequential(nn.Linear(784, int(hp["hidden"])), nn.ReLU(), nn.Linear(int(hp["hidden"]), 10)).to(device)
     model = DDP(model, device_ids=[rank], output_device=rank)
-    optim = torch.optim.AdamW(
-        model.parameters(),
-        lr=float(hparams["lr"]),
-        weight_decay=float(hparams["weight_decay"]),
-    )
+    optim = torch.optim.AdamW(model.parameters(), lr=float(hp["lr"]), weight_decay=float(hp["weight_decay"]))
     criterion = nn.CrossEntropyLoss()
 
-    epochs = int(hparams["epochs"])
-    min_runtime_sec = int(hparams.get("min_runtime_sec", 0))
-    start_time = time.time()
-
-    global_step = 0
-    last_avg_loss = 0.0
+    epochs = int(hp["epochs"])
+    min_runtime = int(hp["min_runtime_sec"])
+    start = time.time()
+    step = 0
+    last = 0.0
     epoch = 0
     while True:
         sampler.set_epoch(epoch)
-        last_avg_loss, global_step = train_one_epoch(
-            model, loader, optim, criterion, device, logger, epoch, global_step, rank
-        )
-        print("rank=%s epoch=%s avg_loss=%.4f" % (rank, epoch, last_avg_loss))
+        model.train()
+        running = 0.0
+        for bx, by in loader:
+            bx, by = bx.to(device, non_blocking=True), by.to(device, non_blocking=True)
+            optim.zero_grad(set_to_none=True)
+            loss = criterion(model(bx), by)
+            loss.backward()
+            optim.step()
+            running += float(loss.item())
+            if rank == 0 and logger is not None:
+                logger.report_scalar("train", "loss", float(loss.item()), iteration=step)
+            step += 1
+        last = running / max(len(loader), 1)
+        if rank == 0 and logger is not None:
+            logger.report_scalar("train", "epoch_loss", last, iteration=epoch)
+        print("rank=%s epoch=%s avg_loss=%.4f" % (rank, epoch, last))
         epoch += 1
 
-        # rank 0 decides whether to continue; broadcast keeps all ranks collective-safe.
-        keep_going = 1 if (epoch < epochs or time.time() - start_time < min_runtime_sec) else 0
-        flag = torch.tensor([keep_going], device=device)
+        # rank0 决定是否继续并 broadcast, 保证各 rank 集合通信同步 (否则会 hang)
+        keep = 1 if (epoch < epochs or time.time() - start < min_runtime) else 0
+        flag = torch.tensor([keep], device=device)
         dist.broadcast(flag, src=0)
         if flag.item() == 0:
             break
 
     dist.barrier()
-
-    if rank == 0 and output_model is not None and logger is not None:
-        ckpt_path = os.path.join(os.getcwd(), "model_ddp.pt")
-        torch.save(model.module.state_dict(), ckpt_path)
-        output_model.update_weights(ckpt_path)
-        output_model.update_design(
-            config_dict={
-                "arch": "mlp_ddp",
-                "world_size": world_size,
-                **hparams,
-                **vgpu,
-                "queue": queue,
-            }
-        )
-        logger.report_single_value("final_epoch_loss", last_avg_loss)
-        logger.report_text("DDP training finished.")
+    if rank == 0 and logger is not None and output_model is not None:
+        ckpt = "model_ddp.pt"
+        torch.save(model.module.state_dict(), ckpt)
+        output_model.update_weights(ckpt)
+        task.upload_artifact("checkpoint", artifact_object=ckpt)
+        logger.report_single_value("final_epoch_loss", last)
         print("DONE (rank 0)")
+    dist.destroy_process_group()
 
-    cleanup_ddp()
 
+def main():
+    # 【平台相关 1/2】依赖文件 (官方 API, 必须在 Task.init 之前)
+    reqs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-remote.txt")
+    Task.force_requirements_env_freeze(force=True, requirements_file=reqs)
 
-def run_ddp_training(
-    hparams: dict[str, Any],
-    vgpu: dict[str, Any],
-    task: Task,
-    master_port: int,
-    queue: str,
-) -> None:
+    task = Task.init(project_name="volcano-vgpu", task_name="train-ddp")
+    task.set_tags(["ddp", "mlp", "example"])
+
+    # ------------------------------------------------------------------
+    # 超参定义 (三选一, 详见 USAGE_zh.md §4)
+    # DDP: 超参在 main() 里解析, 经 vars(args) 传给 worker; rank0 只负责上报 ClearML
+    # ------------------------------------------------------------------
+    # [A] argparse —— 默认
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--batch-size", type=int, default=64, help="每张卡的 batch")
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--hidden", type=int, default=128)
+    parser.add_argument("--num-samples", type=int, default=4096)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--min-runtime-sec", type=int, default=0, help=">0 时循环至此时长, 便于采集监控")
+    args = parser.parse_args()
+
+    # [B] 纯 dict: 取消注释, 并注释掉上面的 argparse 块
+    # hp = task.connect({"epochs": 5, "batch_size": 64, "lr": 1e-3, "weight_decay": 1e-4,
+    #                    "hidden": 128, "num_samples": 4096, "seed": 42, "min_runtime_sec": 0}, name="Training")
+    # class _A: pass
+    # args = _A(); [setattr(args, k, v) for k, v in hp.items()]
+
+    # [C] YAML: 取消注释, 并注释掉 argparse 块; 参考 config.example.yaml
+    # cfg = task.connect_configuration(os.path.join(os.path.dirname(__file__), "config.example.yaml"), name="General")
+    # hp = {**cfg["training"], **cfg.get("data", {})}
+    # class _A: pass
+    # args = _A(); [setattr(args, k.replace("-", "_"), v) for k, v in hp.items()]
+    # setattr(args, "min_runtime_sec", 0)
+
+    # 【平台相关 2/2】★ 申请 vGPU —— 在这里自定义资源 (DDP: vgpu_number 即 world_size) ★
+    vgpu = task.connect({"vgpu_number": 2, "vgpu_memory": 2, "vgpu_cores": 30}, name="VGPU")
+
+    task.execute_remotely(queue_name=QUEUE)  # 本地调试可注释此行
+
+    # ===== 以下只在集群 Pod 内执行 =====
     import torch
     import torch.multiprocessing as mp
 
-    if not torch.cuda.is_available():
-        raise RuntimeError("CUDA is required for DDP training")
+    world_size = int(vgpu["vgpu_number"])
+    if not torch.cuda.is_available() or torch.cuda.device_count() < world_size:
+        raise RuntimeError("need %s GPUs, got %s" % (world_size, torch.cuda.device_count()))
 
-    world_size = int(vgpu.get("vgpu_number", hparams.get("vgpu_number", 1)))
-    visible = torch.cuda.device_count()
-    if visible < world_size:
-        raise RuntimeError(
-            "torch.cuda.device_count()=%s < world_size=%s; check vGPU scheduling"
-            % (visible, world_size)
-        )
-
-    print("Launching DDP: world_size=%s, visible_gpus=%s, master_port=%s" % (world_size, visible, master_port))
+    print("Launching DDP: world_size=%s, visible=%s" % (world_size, torch.cuda.device_count()))
     mp.set_start_method("spawn", force=True)
-    mp.spawn(
-        ddp_worker,
-        args=(world_size, hparams, vgpu, task.id, master_port, queue),
-        nprocs=world_size,
-        join=True,
-    )
-
-
-def main() -> None:
-    args = parse_args()
-
-    apply_standalone_preflight(args)
-
-    task = Task.init(
-        project_name="volcano-vgpu",
-        task_name="train-ddp",
-        task_type=Task.TaskTypes.training,
-        auto_connect_frameworks=False,
-    )
-
-    hparams = task.connect(
-        {
-            "epochs": args.epochs,
-            "batch_size": args.batch_size,
-            "lr": args.lr,
-            "weight_decay": args.weight_decay,
-            "hidden": args.hidden,
-            "num_samples": args.num_samples,
-            "seed": args.seed,
-            "min_runtime_sec": args.min_runtime_sec,
-            "world_size": args.vgpu_number,
-            "master_port": args.master_port,
-        },
-        name="Training",
-    )
-
-    vgpu = connect_vgpu(
-        task,
-        vgpu_number=args.vgpu_number,
-        vgpu_memory=args.vgpu_memory,
-        vgpu_cores=args.vgpu_cores,
-    )
-
-    if args.docker_image:
-        task.set_base_docker(args.docker_image)
-        task.set_packages("")
-    elif args.remote:
-        pin_remote_packages(task, __file__)
-
-    if args.remote:
-        prepare_remote_repo(task, args)
-        task.execute_remotely(queue_name=args.queue, exit_process=True)
-
-    run_ddp_training(
-        hparams=hparams,
-        vgpu=vgpu,
-        task=task,
-        master_port=int(hparams["master_port"]),
-        queue=args.queue,
-    )
+    mp.spawn(ddp_worker, args=(world_size, vars(args), task.id), nprocs=world_size, join=True)
 
 
 if __name__ == "__main__":
