@@ -90,7 +90,7 @@ ClearML Task 入队 (multinode-full-gpu)
   → glue 拉 Task
   → volcanoJobHook: 读 Cluster/nnodes >= 2
        → 构建 Volcano Job YAML（minAvailable=nnodes, replicas=nnodes）
-       → plugins svc/env；MASTER_ADDR = <job-name>-worker-0
+       → plugins svc/env；MASTER_ADDR = <job-name>-worker-0.<job-name>（hostname.subdomain）
        → 每个 replica 容器仍走 clearml-agent bootstrap（与现 Pod 相同）
        → kubectl apply Volcano Job
   → Job watcher：Job/Pod 状态 → 回写 ClearML Task
@@ -127,7 +127,7 @@ vGPU：Job 每个 replica patch `volcano.sh/vgpu-*`（扩展 vgpu 模块）。
 | A1 | 读 Task 超参 | `volcano_job_module.py` | `Cluster/nnodes`；`>=2` 触发 |
 | A2 | Job 命名 | 同上 | `clearml-{task_id前缀}`，符合 DNS-1123 |
 | A3 | 组装 Volcano Job | 同上 | `minAvailable`、`tasks[].replicas` |
-| A4 | svc/env 插件 | 同上 | `MASTER_ADDR={job}-worker-0` |
+| A4 | svc/env 插件 | 同上 | `MASTER_ADDR={job}-worker-0.{job}`（subdomain 必带） |
 | A5 | 合并 basePodTemplate | 同上 | nodeSelector、NCCL env、volume |
 | A6 | 注入 agent bootstrap | 同上 | 复用 glue 容器 command/args/env 生成逻辑 |
 | A7 | patch 入口 | `bootstrap_k8s_volcano_job_patch.py` | `nnodes<2` 走原路径 |
@@ -216,7 +216,7 @@ python train_multinode_volcano_job.py --nnodes 2
 ```
 
 1. `kubectl get job -n clearml` 有 `clearml-*`；2 Pod gang 齐射。  
-2. `MASTER_ADDR=<job>-worker-0`。  
+2. `MASTER_ADDR=<job>-worker-0.<job>`（svc 插件 hostname.subdomain）。  
 3. 1 个 ClearML Task；rank0 scalar 正确。  
 4. 无 Cluster 的单卡任务仍走 Pod，无回归。
 

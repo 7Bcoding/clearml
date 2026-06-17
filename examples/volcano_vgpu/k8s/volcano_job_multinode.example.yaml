@@ -45,7 +45,8 @@ spec:
                 - name: NNODES
                   value: "2"
                 - name: MASTER_ADDR
-                  value: "pytorch-multinode-vgpu-example-worker-0"
+                  # svc 插件 DNS = hostname.subdomain；裸短名解析不到，须带 .<job-name>
+                  value: "pytorch-multinode-vgpu-example-worker-0.pytorch-multinode-vgpu-example"
                 - name: MASTER_PORT
                   value: "29500"
                 - name: CLEARML_TASK_ID

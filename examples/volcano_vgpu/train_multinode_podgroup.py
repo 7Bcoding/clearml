@@ -54,6 +54,9 @@ def _poll_master_ip(master_task_id: str) -> str:
     master = Task.get_task(task_id=master_task_id)
     deadline = time.time() + POLL_SEC
     while time.time() < deadline:
+        # 必须 reload：get_parameter 读的是 task 本地缓存 self.data，
+        # 不刷新会一直读 Task.get_task 那一刻的旧快照，永远看不到 rank0 后写入的 IP
+        master.reload()
         ip = master.get_parameter(name=RUNTIME_MASTER_IP, default=None)
         if ip:
             return str(ip)

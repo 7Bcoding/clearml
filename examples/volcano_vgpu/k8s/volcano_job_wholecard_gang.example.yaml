@@ -9,7 +9,8 @@
 #        --from-file=train_volcano_job_smoke.py=../train_volcano_job_smoke.py
 #   3. kubectl apply -f volcano_job_wholecard_gang.example.yaml
 #
-# MASTER_ADDR = <JOB_NAME>-worker-0 （Volcano svc 插件 DNS，Job 内短主机名）
+# MASTER_ADDR = <JOB_NAME>-worker-0.<JOB_NAME> （Volcano svc 插件 DNS：hostname.subdomain）
+#   注意：裸 <JOB_NAME>-worker-0 解析不到，subdomain=<JOB_NAME> 必须带上
 # NODE_RANK   = VK_TASK_INDEX       （Volcano env 插件，train_volcano_job_smoke.py 读取）
 ---
 apiVersion: batch.volcano.sh/v1alpha1
@@ -58,7 +59,7 @@ spec:
                 - name: NNODES
                   value: "2"
                 - name: MASTER_ADDR
-                  value: "clearml-vjob-smoke-example-worker-0"
+                  value: "clearml-vjob-smoke-example-worker-0.clearml-vjob-smoke-example"
                 - name: MASTER_PORT
                   value: "29500"
                 - name: CLEARML_TASK_ID

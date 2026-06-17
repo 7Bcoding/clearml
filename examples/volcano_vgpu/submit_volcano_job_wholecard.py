@@ -32,7 +32,10 @@ _TORCH_INDEX = "https://download.pytorch.org/whl/cu124"
 
 
 def _job_manifest(*, job_name, namespace, queue, num_nodes, master_port, clearml_task_id, configmap_name):
-    master_host = "%s-worker-0" % job_name
+    # Volcano svc 插件给 Pod 设 hostname=<job>-worker-0、subdomain=<job>。
+    # 默认 k8s resolv.conf 的 search 域不含 subdomain，裸 <job>-worker-0 解析不到，
+    # 必须带上 subdomain：<job>-worker-0.<job>（ndots<5 时会自动补 .<ns>.svc.cluster.local）
+    master_host = "%s-worker-0.%s" % (job_name, job_name)
     task_id = clearml_task_id or ""
     return textwrap.dedent(
         """\

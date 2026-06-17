@@ -454,7 +454,7 @@ kubectl logs -n clearml <job-name>-worker-0-xxx --tail=80
 kubectl logs -n clearml <job-name>-worker-1-xxx --tail=80
 ```
 
-日志应含：`rank=0 DONE ok=True sum=3.0`、`MASTER_ADDR=<job-name>-worker-0`。
+日志应含：`rank=0 DONE ok=True sum=3.0`、`MASTER_ADDR=<job-name>-worker-0.<job-name>`（svc 插件 hostname.subdomain）。
 
 ### 3.A.5 WebUI 验证（若未加 --no-clearml-task）
 
