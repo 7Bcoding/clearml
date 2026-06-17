@@ -28,10 +28,6 @@ agentk8sglue:
   basePodTemplate:
     schedulerName: volcano
 
-    # 方案 2 PodGroup gang（与 podgroup_clearml_gang_full_2.example.yaml 同名）
-    annotations:
-      scheduling.k8s.io/group-name: clearml-gang-full-2
-
     runtimeClassName: nvidia
     resources:
       limits:
