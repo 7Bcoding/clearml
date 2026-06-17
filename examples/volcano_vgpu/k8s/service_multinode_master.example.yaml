@@ -1,0 +1,36 @@
+# 方案 2 MASTER_ADDR 补法 C：service 模式 —— Headless Service + 手动 Endpoints
+#
+# 适用: 已知 rank0 将落在某节点，且该节点 IP 固定（常配合 hostNetwork 或节点 IP = NCCL 地址）
+#
+# 步骤:
+#   1. 将 Endpoints 中 10.0.1.11 改为 rank0 节点 IP
+#   2. kubectl apply -f service_multinode_master.example.yaml
+#   3. （可选）helm 叠加 values-multinode-podgroup-service.example.yaml 注入 MULTINODE_MASTER_ADDR
+#   4. python submit_multinode_podgroup.py --master-addr-mode service \
+#        --master-addr clearml-multinode-master.clearml.svc.cluster.local
+#
+# DNS 解析到 Endpoints 中的 IP；rank0 须在该 IP 上监听 29500（hostNetwork 或 Pod IP 与节点路由互通）
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: clearml-multinode-master
+  namespace: clearml
+spec:
+  clusterIP: None
+  ports:
+    - name: nccl
+      port: 29500
+      targetPort: 29500
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: clearml-multinode-master
+  namespace: clearml
+subsets:
+  - addresses:
+      - ip: 10.0.1.11
+    ports:
+      - name: nccl
+        port: 29500

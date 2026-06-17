@@ -425,6 +425,19 @@ if int(os.environ.get("RANK", "0")) == 0:
 # megatron.training.pretrain(...) / deepspeed.launch 等由训练栈接管
 ```
 
+### 8.3 整卡多机（零改 helm Python 源码）
+
+| 需求 | 做法 | 入口 |
+|------|------|------|
+| 跨节点 DDP（脚本最简，无 gang） | `Task.launch_multi_node()` | `train_launch_multinode_wholecard.py` |
+| **PodGroup gang** + ClearML glue | PodGroup + N Task 齐入队 | `submit_multinode_podgroup.py` |
+| **Volcano Job gang**（原生 MASTER_ADDR） | `kubectl` / submit 脚本 | `submit_volcano_job_wholecard.py` |
+
+整卡队列 **`multinode-full-gpu`**（`vgpuHook: false`，`nvidia.com/gpu`）；方案 1/2 **不要** `connect(VGPU)`。
+
+**逐步命令（含 kubectl / helm / 验证）见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md)**：第 0 章环境检查 → 第 1 章平台准备 → 方案 1/2/3 分章操作。  
+**方案 3b（改 Agent 生成 Volcano Job，算法只 `python train.py`）** → [`PLATFORM_scheme3b_volcano_job_agent_zh.md`](PLATFORM_scheme3b_volcano_job_agent_zh.md)。
+
 ---
 
 ## 9. vGPU 三个字段怎么填
@@ -452,16 +465,27 @@ if int(os.environ.get("RANK", "0")) == 0:
 | 非 PyTorch 框架 | ✅ | 同样写法，import 你的框架，改 `requirements-remote.txt` |
 | 长跑 / 采集监控 | ✅ | 任务需跑过监控周期(≥1–2min)，见 CNN 示例 `--target-minutes` |
 | YAML / Hydra 配置 | ✅ | §4.3 / §4.4 |
-| 多机多卡 / 大模型（FSDP 等） | 🔧 视平台 | 平台就绪后见 §8；管理员见 `PLATFORM_scaling_zh.md` |
+| 多机多卡 / 大模型（FSDP 等） | 🔧 视平台 | 整卡多机：`MULTINODE_schemes_zh.md` |
 
 ---
 
 ## 11. 提交与复跑
 
 ```bash
-python train_template.py                       # 单卡, 入队 volcano-queue
-python train_ddp_volcano_vgpu.py               # 双卡 DDP
-python train_ddp_cnn_volcano_vgpu.py           # 双卡 CNN 长跑 (监控曲线)
+cd examples/volcano_vgpu
+
+# 单卡 / 单机多卡（vGPU 队列 volcano-queue）
+python train_template.py
+python train_ddp_volcano_vgpu.py
+python train_ddp_cnn_volcano_vgpu.py
+
+# 整卡多机（队列 multinode-full-gpu；完整步骤见 MULTINODE_schemes_zh.md）
+python train_launch_multinode_wholecard.py --num-nodes 2 --queue multinode-full-gpu
+python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode task-poll
+python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode fixed --master-addr <节点IP>
+python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode service \
+  --master-addr clearml-multinode-master.clearml.svc.cluster.local
+python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 ```
 
 - **本地调试**：注释掉 `execute_remotely(...)` 那一行，即可在本机直接跑（需本机有 torch）。
@@ -471,8 +495,6 @@ python train_ddp_cnn_volcano_vgpu.py           # 双卡 CNN 长跑 (监控曲线
 ---
 
 ## 12. 在 WebUI 看什么
-
-| 位置 | 内容 |
 |------|------|
 | SCALARS | 你 `report_scalar` 的曲线（如 `train/loss`） |
 | SCALARS（`:monitor:machine`） | CPU/内存/磁盘/网络（任务需 ≥1–2 分钟） |
@@ -510,8 +532,19 @@ python train_ddp_cnn_volcano_vgpu.py           # 双卡 CNN 长跑 (监控曲线
 | `train_volcano_vgpu.py` | 单卡完整示例：OutputModel + InputModel 注释 + set_base_docker 注释 |
 | `train_ddp_volcano_vgpu.py` | 双卡 DDP（MLP，`--min-runtime-sec` 便于监控） |
 | `train_ddp_cnn_volcano_vgpu.py` | 长跑 DDP（CNN，默认 ≥5 分钟，多指标 + artifact） |
+| `train_launch_multinode_wholecard.py` | **方案 1**：整卡多机 `launch_multi_node`（无 gang） |
+| `submit_multinode_podgroup.py` | **方案 2**：本地 N Task 齐入队（PodGroup gang） |
+| `train_multinode_podgroup.py` | **方案 2**：Pod 内训练（三种 MASTER_ADDR 模式） |
+| `MULTINODE_schemes_zh.md` | **整卡多机**三方案逐步命令手册 |
+| `k8s/volcano_queue_multinode_full_gpu.example.yaml` | Volcano Queue CR |
+| `k8s/values-multinode-full-gpu*.yaml` | Helm 整卡队列 + gang / hostNetwork |
+| `k8s/podgroup_clearml_gang_full_2.example.yaml` | PodGroup CR（方案 2） |
+| `k8s/service_multinode_master.example.yaml` | MASTER_ADDR 补法 C（Service DNS） |
+| `submit_volcano_job_wholecard.py` | **方案 3**：Volcano Job gang 提交 |
+| `train_volcano_job_smoke.py` | **方案 3**：Job Pod 内 NCCL 冒烟 |
+| `k8s/volcano_job_wholecard_gang.example.yaml` | **方案 3a**：Volcano Job 模板 |
+| `PLATFORM_scheme3b_volcano_job_agent_zh.md` | **方案 3b**：改 Agent 生成 Volcano Job（平台排期） |
 | `config.example.yaml` | `connect_configuration` 示例配置 |
-| `PLATFORM_scaling_zh.md` | **平台管理员**：多机多卡 / 大模型架构与改造（非算法工程师必读） |
 | `requirements-remote.txt` | Pod 内依赖清单 |
 | `smoke_test_vgpu.py` / `test_vgpu_per_task.py` | 平台验证脚本（仍用 `vgpu.py`，非算法工程师必读） |
 | `vgpu.py` | 平台验证脚本的辅助库（训练模板**不需要**） |
@@ -528,5 +561,6 @@ python train_ddp_cnn_volcano_vgpu.py           # 双卡 CNN 长跑 (监控曲线
 已有 Hydra 项目            → §4.4，不必改成 argparse
 要 GPU 监控曲线            → 任务跑 ≥5min，或 train_ddp_cnn_volcano_vgpu.py
 单机多卡 DDP               → train_ddp_*.py，vgpu_number = 该机卡数
-多机 / 大模型              → §8（平台就绪后）；平台改造见 PLATFORM_scaling_zh.md
+多机 DDP（无 gang）         → train_launch_multinode_volcano_vgpu.py
+多机 + Volcano gang         → submit_multinode_local.py + PodGroup（见 PLATFORM_multinode_zero_patch_zh.md）
 ```

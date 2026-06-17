@@ -1,0 +1,70 @@
+# 整卡多机队列（方案 1 / 方案 2 共用基础 values）
+# 在 clearml-helm-charts 仓库叠加:
+#   helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
+#     -f examples/volcano-vgpu/custom_values.yaml \
+#     -f /path/to/clearml/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml
+#
+# 方案 2 另需: kubectl apply podgroup_clearml_gang_full_2.example.yaml
+# 方案 2 task-poll 模式: 本文件已含 MY_POD_IP
+# 方案 1: 已含 CLEARML_MULTI_NODE_MASTER_DEF_ADDR
+
+clearml:
+  existingAgentk8sglueSecret: "clearml-agent-creds"
+
+agentk8sglue:
+  queue: multinode-full-gpu
+  createQueueIfNotExists: true
+  defaultContainerImage: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+  vgpuHook:
+    enabled: false
+
+  extraEnvs:
+    - name: "CLEARML_AGENT_NO_UPDATE"
+      value: "true"
+
+  basePodTemplate:
+    schedulerName: volcano
+
+    # 方案 2 PodGroup gang（与 podgroup_clearml_gang_full_2.example.yaml 同名）
+    annotations:
+      scheduling.k8s.io/group-name: clearml-gang-full-2
+
+    runtimeClassName: nvidia
+    resources:
+      limits:
+        nvidia.com/gpu: "1"
+      requests:
+        cpu: "8"
+        memory: 32Gi
+        nvidia.com/gpu: "1"
+
+    env:
+      # 方案 1: launch_multi_node 读此变量作为 master_addr
+      - name: CLEARML_MULTI_NODE_MASTER_DEF_ADDR
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      # 方案 2 task-poll: rank0 发布、worker 轮询
+      - name: MY_POD_IP
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      - name: NCCL_DEBUG
+        value: "INFO"
+      - name: NCCL_IB_DISABLE
+        value: "1"
+      - name: NCCL_SOCKET_IFNAME
+        value: "eth0"
+
+    nodeSelector:
+      gpu.present: "true"
+
+    volumes:
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache
+          type: DirectoryOrCreate
+    volumeMounts:
+      - name: clearml-cache
+        mountPath: /root/.clearml

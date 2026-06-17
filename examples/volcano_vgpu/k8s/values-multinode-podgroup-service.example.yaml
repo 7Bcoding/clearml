@@ -1,0 +1,6 @@
+# 方案 2 service 模式：在 Pod 内注入 MULTINODE_MASTER_ADDR（与 submit --master-addr 二选一即可）
+agentk8sglue:
+  basePodTemplate:
+    env:
+      - name: MULTINODE_MASTER_ADDR
+        value: "clearml-multinode-master.clearml.svc.cluster.local"
