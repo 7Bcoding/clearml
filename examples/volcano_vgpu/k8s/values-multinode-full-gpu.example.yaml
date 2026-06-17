@@ -1,4 +1,10 @@
-# 整卡多机队列
+# 整卡多机队列（要求节点暴露整卡 nvidia.com/gpu）
+#
+# ⚠️ 先自检：kubectl get nodes -o json | jq -r '.items[] |
+#      "\(.metadata.name) nvidia.com/gpu=\(.status.allocatable["nvidia.com/gpu"])"'
+#    若 nvidia.com/gpu=0（HAMi/vGPU-only 集群），本文件用不了 ——
+#    请改用 values-multinode-vgpu.standalone.example.yaml + volcano_queue_multinode_vgpu.example.yaml
+#    （整卡 = 静态 volcano.sh/vgpu-cores:100 + 整卡显存）。详见 MULTINODE_schemes_zh.md §0.4。
 
 clearml:
   existingAgentk8sglueSecret: "clearml-agent-creds"

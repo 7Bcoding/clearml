@@ -1,0 +1,20 @@
+# Volcano Queue：multinode 队列（HAMi/vGPU 集群 —— 节点无 nvidia.com/gpu 时用此文件）
+#
+# 你的节点 Allocatable:
+#   nvidia.com/gpu: 0
+#   volcano.sh/vgpu-number / vgpu-memory: 有值
+#
+# kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: multinode-full-gpu
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "32"
+    memory: 128Gi
+    volcano.sh/vgpu-number: "8"
+    volcano.sh/vgpu-memory: "92"

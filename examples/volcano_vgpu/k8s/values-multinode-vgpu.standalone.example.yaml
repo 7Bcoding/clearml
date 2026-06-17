@@ -1,0 +1,85 @@
+# multinode 队列 —— HAMi/vGPU 集群专用（节点 nvidia.com/gpu=0 时必须用本文件）
+#
+# 现象: Pod Pending, PodGroup 报 overused nvidia.com/gpu
+# 原因: 集群只有 volcano.sh/vgpu-*，没有 nvidia.com/gpu device plugin
+#
+# 部署:
+#   kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+#   helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
+#     -f ~/clearml/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml
+#
+# 4090 整卡等价约 24GiB；A100-80G 请改 vgpu_memory。factor=1024 时单位为 GiB。
+
+clearml:
+  existingAgentk8sglueSecret: "clearml-agent-creds"
+
+agentk8sglue:
+  image:
+    repository: "allegroai/clearml-agent-k8s-base"
+    tag: "1.24-21"
+
+  apiServerUrlReference: "http://10.10.36.6:30008"
+  fileServerUrlReference: "http://10.10.36.6:30081"
+  webServerUrlReference: "http://10.10.36.6:30080"
+  clearmlcheckCertificate: false
+
+  queue: multinode-full-gpu
+  createQueueIfNotExists: false
+  defaultContainerImage: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+  # 整卡多机用「静态 vGPU 资源」直接写在 basePodTemplate（见下方 resources），
+  # 每个 Pod 固定拿 1 张整卡（cores:100 + 整卡显存）。因此 **不依赖** clearml 的 vgpuHook
+  # 去读 Task 的 VGPU 段 —— hook 关闭，训练脚本（train_launch_multinode_wholecard.py）
+  # 也无需 connect(VGPU)。HAMi 的显存/算力隔离由集群侧 HAMi webhook 按 Pod 的
+  # volcano.sh/vgpu-* 资源执行，与 clearml hook 无关。
+  vgpuHook:
+    enabled: false
+
+  extraEnvs:
+    - name: "CLEARML_AGENT_NO_UPDATE"
+      value: "true"
+
+  basePodTemplate:
+    schedulerName: volcano
+    runtimeClassName: nvidia
+
+    annotations:
+      volcano.sh/vgpu-mode: "hami-core"
+      # 避免 PodGroup 落到 default 队列（按 Volcano 版本二选一，无效则试 scheduling.volcano.sh/queue-name）
+      volcano.sh/queue-name: multinode-full-gpu
+
+    resources:
+      limits:
+        volcano.sh/vgpu-number: "1"
+        volcano.sh/vgpu-memory: "24"
+        volcano.sh/vgpu-cores: "100"
+      requests:
+        cpu: "8"
+        memory: 32Gi
+        volcano.sh/vgpu-number: "1"
+        volcano.sh/vgpu-memory: "24"
+        volcano.sh/vgpu-cores: "100"
+
+    env:
+      - name: CLEARML_MULTI_NODE_MASTER_DEF_ADDR
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      - name: NCCL_DEBUG
+        value: "INFO"
+      - name: NCCL_IB_DISABLE
+        value: "1"
+      - name: NCCL_SOCKET_IFNAME
+        value: "eth0"
+
+    nodeSelector:
+      gpu.present: "true"
+
+    volumes:
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache
+          type: DirectoryOrCreate
+    volumeMounts:
+      - name: clearml-cache
+        mountPath: /root/.clearml

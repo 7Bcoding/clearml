@@ -76,6 +76,24 @@ kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU:.status.capacity.nvi
 
 记录节点名，后文替换 `<GPU_NODE_A>`、`<GPU_NODE_B>`。
 
+## 0.4 GPU 资源类型自检（决定走哪套 values / queue —— 必做）
+
+整卡多机有两种资源暴露方式，**先确认你的集群是哪种**，否则 Pod 会一直 `Unschedulable`：
+
+```bash
+kubectl get nodes -o json | jq -r '.items[] |
+  "\(.metadata.name)  nvidia.com/gpu=\(.status.allocatable["nvidia.com/gpu"])  vgpu=\(.status.allocatable["volcano.sh/vgpu-number"])"'
+```
+
+| 自检结果 | 集群类型 | 用哪套文件 | 「整卡」怎么表达 |
+|----------|----------|-----------|------------------|
+| `nvidia.com/gpu` ≥ 1 | 原生 / GPU-Operator | `values-multinode-full-gpu*.yaml` + `volcano_queue_multinode_full_gpu.example.yaml` | 申请 `nvidia.com/gpu: 1` |
+| `nvidia.com/gpu=0`，只有 `vgpu` | **HAMi / vGPU-only** | `values-multinode-vgpu.standalone.example.yaml` + `volcano_queue_multinode_vgpu.example.yaml` | 静态 `volcano.sh/vgpu-number:1 + vgpu-cores:100 + vgpu-memory:<整卡GiB>` |
+
+> **HAMi 集群要点**：整卡资源**静态写在 Agent 的 basePodTemplate**（vGPU values 已写好），`vgpuHook: false`，训练脚本**仍然不 connect(VGPU)**——隔离由集群侧 HAMi webhook 按 Pod 的 `volcano.sh/vgpu-*` 执行。下文凡出现 `values-multinode-full-gpu*` / `volcano_queue_multinode_full_gpu` 的命令，HAMi 集群一律换成对应的 `*-vgpu*` 文件即可，其余步骤（label / 提交 / 验证）完全一致。
+>
+> 常见报错 `PodGroup ... overused nvidia.com/gpu`：多半是旧的 `multinode-full-gpu` 队列 capability 仍写着 `nvidia.com/gpu`。`kubectl apply` vGPU 版队列文件（同名覆盖）即可。
+
 ---
 
 # 第 1 章：共用平台准备（方案 1 / 2 必须；方案 3 需要 Queue + 节点 label）
