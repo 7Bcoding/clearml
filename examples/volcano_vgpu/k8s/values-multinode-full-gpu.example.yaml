@@ -45,17 +45,6 @@ agentk8sglue:
         valueFrom:
           fieldRef:
             fieldPath: status.podIP
-      # 方案 2 task-poll: rank0 发布、worker 轮询
-      - name: MY_POD_IP
-        valueFrom:
-          fieldRef:
-            fieldPath: status.podIP
-      - name: NCCL_DEBUG
-        value: "INFO"
-      - name: NCCL_IB_DISABLE
-        value: "1"
-      - name: NCCL_SOCKET_IFNAME
-        value: "eth0"
 
     nodeSelector:
       gpu.present: "true"
