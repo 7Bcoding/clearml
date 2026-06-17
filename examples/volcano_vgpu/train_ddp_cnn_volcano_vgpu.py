@@ -179,16 +179,14 @@ def main():
     # hp = task.connect({"epochs": 10000, "target_minutes": 5.0, "batch_size": 128, "lr": 1e-3,
     #                    "weight_decay": 5e-4, "width": 64, "image_size": 32, "in_channels": 3,
     #                    "num_classes": 10, "num_samples": 20000, "seed": 42}, name="Training")
-    # class _A: pass
-    # args = _A(); [setattr(args, k, v) for k, v in hp.items()]
+    # args = argparse.Namespace(**hp)   # 之后照常用 args.epochs ...; vars(args) 仍可传给 worker
 
     # [C] YAML: 取消注释, 并注释掉 argparse 块; 参考 config.example.yaml
+    # CNN 用到的 width/image_size 等 config.example.yaml 没有, 用 dict 默认值兜底再被 yaml 覆盖
     # cfg = task.connect_configuration(os.path.join(os.path.dirname(__file__), "config.example.yaml"), name="General")
-    # hp = {**cfg["training"], **cfg.get("model", {}), **cfg.get("data", {})}
-    # class _A: pass
-    # args = _A(); [setattr(args, k.replace("-", "_"), v) for k, v in hp.items()]
-    # setattr(args, "target_minutes", 5.0); setattr(args, "width", 64); setattr(args, "image_size", 32)
-    # setattr(args, "in_channels", 3); setattr(args, "num_classes", 10)
+    # hp = {"target_minutes": 5.0, "width": 64, "image_size": 32, "in_channels": 3, "num_classes": 10,
+    #       **cfg["training"], **cfg.get("model", {}), **cfg.get("data", {})}
+    # args = argparse.Namespace(**hp)
 
     # 【平台相关 2/2】★ 申请 vGPU —— 在这里自定义资源 (DDP: vgpu_number 即 world_size) ★
     vgpu = task.connect({"vgpu_number": 2, "vgpu_memory": 2, "vgpu_cores": 50}, name="VGPU")

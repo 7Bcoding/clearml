@@ -20,7 +20,7 @@ task.connect({"vgpu_number": 1, "vgpu_memory": 2, "vgpu_cores": 30}, name="VGPU"
 
 第 2 行是**唯一的平台特定知识**：Agent 的 vgpuHook 只读取名为 `VGPU` 的超参段里的三个键。`task.connect(dict, name="VGPU")` 是 100% 官方 API。
 
-> 早期版本里的 `vgpu.py` / `setup_task` / `connect_vgpu` 等封装**不再需要**。`vgpu.py` 仅平台验证脚本仍在用，算法工程师可忽略。依赖、git、vGPU 注入等由平台在 Agent 侧一次性配置（见 `PLATFORM_scaling_zh.md`）。
+> 早期版本里的 `vgpu.py` / `setup_task` / `connect_vgpu` 等封装**不再需要**。`vgpu.py` 仅平台验证脚本仍在用，算法工程师可忽略。依赖、git、vGPU 注入等由平台在 Agent 侧一次性配置（运维负责，见 §5.5）。
 
 ---
 
@@ -110,6 +110,7 @@ hp = task.connect(
 )
 # hp 是 live dict: WebUI 改值后 Pod 内读到的也是新值
 epochs = hp["epochs"]
+# 想继续用 args.xxx 风格(模板 [B]/[C] 即此写法): args = argparse.Namespace(**hp)
 ```
 
 **注意：** 与 **VGPU** 段一样，`name` 决定 WebUI 分组名；业务超参请用 `Training` / `Hyperparameters` 等，**不要**和 `VGPU` 混在同一段。
@@ -178,6 +179,8 @@ def ddp_worker(rank, world_size, hp, task_id):
 | **远程执行** | `task.execute_remotely(queue_name="volcano-queue")` | 入队到 Agent | 全部（平台） |
 | **复跑改参** | WebUI Clone → 改 CONFIGURATION → Enqueue | — | §11 |
 | **资源监控** | Agent 自动上报 | SCALARS `:monitor:gpu` / `:monitor:machine` | 长跑 CNN 示例 |
+| **框架自动捕获** | `Task.init(auto_connect_frameworks=...)` | SCALARS / DEBUG SAMPLES / MODELS | 默认开启，见 §5.6 |
+| **数据集** | `Dataset.get(...).get_local_copy()` | DATASETS | 见 §5.7 |
 
 ### 5.1 指标怎么记
 
@@ -226,6 +229,60 @@ task.set_tags(["detection", "yolov8", "exp-042"])
 | git SSH→HTTPS | Agent 一次性 git 配置（运维） |
 | vGPU 注入 Pod | Agent vgpuHook（运维）；你只写 `connect(VGPU)` |
 | 封装 `setup_task` / `vgpu.py` | 训练脚本不需要；验证脚本可选 |
+
+### 5.6 框架自动捕获（很多手动上报其实不用写）
+
+`Task.init` 默认 `auto_connect_frameworks=True`，ClearML 会**自动**把下列内容抓进 WebUI，无需你手写 `report_scalar`：
+
+| 框架 | 自动捕获 | 落在 |
+|------|----------|------|
+| **TensorBoard**（`SummaryWriter`）/ **TensorBoardX** | `add_scalar` / `add_image` / `add_histogram` | SCALARS / DEBUG SAMPLES |
+| **matplotlib** | `plt.show()` / `savefig()` | DEBUG SAMPLES → PLOTS |
+| **PyTorch / TF / Keras / XGBoost / LightGBM** | `torch.save()` 等模型保存 | MODELS |
+
+也就是说：**已经在用 TensorBoard 的项目，原样跑就有曲线**，不必改成 `logger.report_scalar`。如需关闭某项（例如不想自动注册每个 `torch.save`）：
+
+```python
+task = Task.init(
+    project_name="volcano-vgpu", task_name="my-training",
+    auto_connect_frameworks={"pytorch": False, "matplotlib": True, "tensorboard": True},
+)
+```
+
+手动 `report_scalar`（§5.1）与自动捕获可并存；DDP 下注意自动捕获也只应发生在 **rank 0**（其余 rank 不 `Task.init`/不写 TB）。
+
+### 5.7 数据集：用 `clearml.Dataset` 替代「换成你的 Dataset」
+
+模板里的 `torch.randn` 只是占位。真实数据建议用 ClearML Data 做**版本化 + 跨节点拉取**，Pod 内不依赖宿主机路径：
+
+```python
+from clearml import Dataset
+
+# 一次性：注册数据集（本地或 CI 执行）
+ds = Dataset.create(dataset_name="cifar-mini", dataset_project="volcano-vgpu")
+ds.add_files("/local/path/to/data")
+ds.upload()         # 上传到 files server
+ds.finalize()       # 封版，得到一个不可变版本
+
+# 训练脚本里（execute_remotely 之后、Pod 内）：按名取最新版并拉到本地
+data_root = Dataset.get(
+    dataset_name="cifar-mini", dataset_project="volcano-vgpu"
+).get_local_copy()  # 返回 Pod 内本地路径，喂给你的 Dataset/DataLoader
+```
+
+- `get_local_copy()` 在 Pod 内带缓存，多次 / 多卡复用同一份。
+- DDP 下各 rank 都可 `get`（命中缓存），但**只 rank 0 做 `create/upload`**。
+- WebUI → DATASETS 可看版本血缘；Task 会记录用了哪个数据集版本，便于复现。
+
+### 5.8 进阶能力指针（按需，超出单脚本范围）
+
+| 能力 | 入口（官方 API） | 适用 |
+|------|------------------|------|
+| **超参搜索 HPO** | `from clearml.automation import HyperParameterOptimizer` | 对一个已跑通的 Task 批量扫参，结果自动汇总对比 |
+| **多步流水线 Pipeline** | `from clearml.automation.controller import PipelineController` / `PipelineDecorator` | 数据准备 → 训练 → 评估串成 DAG |
+| **断点续训 / 复用 Task** | `Task.init(..., continue_last_task=True)` | 长跑被中断后接着写同一组指标/模型 |
+
+这三者都是标准 ClearML 能力，与 Volcano/vGPU 无关。HPO / Pipeline 通常单独写一个「控制器脚本」，由它去 clone & enqueue 你的训练 Task（训练脚本本身仍是 §6 的模板）。详见 [ClearML 官方文档](https://clear.ml/docs/latest/docs/)。
 
 ---
 
@@ -313,11 +370,11 @@ if __name__ == "__main__":
 
 ## 8. 多机与大模型训练（平台就绪后）
 
-> 跨节点多机、FSDP、Megatron 等需要**平台侧**先支持多 Pod Job 与专用队列；就绪前请继续用 `train_template.py` / `train_ddp_*.py`（单 Pod）。平台改造见同目录 **`PLATFORM_scaling_zh.md`**（平台管理员文档）。
+> 跨节点多机、FSDP、Megatron 等需要**平台侧**先支持多 Pod Job 与专用队列；就绪前请继续用 `train_template.py` / `train_ddp_*.py`（单 Pod）。操作手册见 **`MULTINODE_schemes_zh.md`**；平台改造（Agent 生成 Volcano Job）见 **`PLATFORM_scheme3b_volcano_job_agent_zh.md`**（平台管理员文档）。
 
 ### 8.1 多机多卡：torchrun 入口（替代 mp.spawn）
 
-平台支持后，业务脚本由 **torchrun** 在各节点拉起进程（不再用 `mp.spawn`）。ClearML 仍只在 **global rank 0** 写日志。
+平台支持后，业务脚本由 **torchrun** 在各节点拉起进程（不再用 `mp.spawn`）。ClearML 仍只在 **global rank 0** 写日志。**完整可复制版见 [`train_multinode_ddp_template.py`](train_multinode_ddp_template.py)**（与下方片段一致）。
 
 ```python
 #!/usr/bin/env python3
@@ -465,6 +522,9 @@ if int(os.environ.get("RANK", "0")) == 0:
 | 非 PyTorch 框架 | ✅ | 同样写法，import 你的框架，改 `requirements-remote.txt` |
 | 长跑 / 采集监控 | ✅ | 任务需跑过监控周期(≥1–2min)，见 CNN 示例 `--target-minutes` |
 | YAML / Hydra 配置 | ✅ | §4.3 / §4.4 |
+| 已用 TensorBoard / matplotlib | ✅ | 自动捕获，原样跑（§5.6） |
+| 数据集版本化 | ✅ | `clearml.Dataset`（§5.7） |
+| 超参搜索 / 多步流水线 | ✅ | `HyperParameterOptimizer` / `PipelineController`（§5.8） |
 | 多机多卡 / 大模型（FSDP 等） | 🔧 视平台 | 整卡多机：`MULTINODE_schemes_zh.md` |
 
 ---
@@ -495,6 +555,8 @@ python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 ---
 
 ## 12. 在 WebUI 看什么
+
+| 位置 | 内容 |
 |------|------|
 | SCALARS | 你 `report_scalar` 的曲线（如 `train/loss`） |
 | SCALARS（`:monitor:machine`） | CPU/内存/磁盘/网络（任务需 ≥1–2 分钟） |
@@ -532,6 +594,7 @@ python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 | `train_volcano_vgpu.py` | 单卡完整示例：OutputModel + InputModel 注释 + set_base_docker 注释 |
 | `train_ddp_volcano_vgpu.py` | 双卡 DDP（MLP，`--min-runtime-sec` 便于监控） |
 | `train_ddp_cnn_volcano_vgpu.py` | 长跑 DDP（CNN，默认 ≥5 分钟，多指标 + artifact） |
+| `train_multinode_ddp_template.py` | **多机 DDP 训练模板**（torchrun 入口，平台支持多 Pod Job 后用） |
 | `train_launch_multinode_wholecard.py` | **方案 1**：整卡多机 `launch_multi_node`（无 gang） |
 | `submit_multinode_podgroup.py` | **方案 2**：本地 N Task 齐入队（PodGroup gang） |
 | `train_multinode_podgroup.py` | **方案 2**：Pod 内训练（三种 MASTER_ADDR 模式） |
@@ -561,6 +624,7 @@ python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 已有 Hydra 项目            → §4.4，不必改成 argparse
 要 GPU 监控曲线            → 任务跑 ≥5min，或 train_ddp_cnn_volcano_vgpu.py
 单机多卡 DDP               → train_ddp_*.py，vgpu_number = 该机卡数
-多机 DDP（无 gang）         → train_launch_multinode_volcano_vgpu.py
-多机 + Volcano gang         → submit_multinode_local.py + PodGroup（见 PLATFORM_multinode_zero_patch_zh.md）
+多机 DDP（无 gang）         → train_launch_multinode_wholecard.py
+多机 DDP 真实训练（torchrun）→ train_multinode_ddp_template.py（平台支持多 Pod Job 后）
+多机 + Volcano gang         → submit_multinode_podgroup.py + PodGroup（见 MULTINODE_schemes_zh.md）
 ```

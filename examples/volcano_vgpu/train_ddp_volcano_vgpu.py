@@ -133,15 +133,12 @@ def main():
     # [B] 纯 dict: 取消注释, 并注释掉上面的 argparse 块
     # hp = task.connect({"epochs": 5, "batch_size": 64, "lr": 1e-3, "weight_decay": 1e-4,
     #                    "hidden": 128, "num_samples": 4096, "seed": 42, "min_runtime_sec": 0}, name="Training")
-    # class _A: pass
-    # args = _A(); [setattr(args, k, v) for k, v in hp.items()]
+    # args = argparse.Namespace(**hp)   # 之后照常用 args.epochs ...; vars(args) 仍可传给 worker
 
     # [C] YAML: 取消注释, 并注释掉 argparse 块; 参考 config.example.yaml
     # cfg = task.connect_configuration(os.path.join(os.path.dirname(__file__), "config.example.yaml"), name="General")
-    # hp = {**cfg["training"], **cfg.get("data", {})}
-    # class _A: pass
-    # args = _A(); [setattr(args, k.replace("-", "_"), v) for k, v in hp.items()]
-    # setattr(args, "min_runtime_sec", 0)
+    # hp = {**cfg["training"], **cfg.get("data", {}), "min_runtime_sec": 0}
+    # args = argparse.Namespace(**hp)
 
     # 【平台相关 2/2】★ 申请 vGPU —— 在这里自定义资源 (DDP: vgpu_number 即 world_size) ★
     vgpu = task.connect({"vgpu_number": 2, "vgpu_memory": 2, "vgpu_cores": 30}, name="VGPU")

@@ -39,15 +39,11 @@ args = parser.parse_args()
 # [B] 纯 dict: 取消注释, 并注释掉上面的 argparse 块
 # hp = task.connect({"epochs": 5, "batch_size": 128, "lr": 1e-3, "weight_decay": 1e-4,
 #                    "hidden": 256, "seed": 42}, name="Training")
-# class _A: pass
-# args = _A(); [setattr(args, k, v) for k, v in hp.items()]
+# args = argparse.Namespace(**hp)   # 之后照常用 args.epochs / args.batch_size ...
 
 # [C] YAML: 取消注释, 并注释掉 argparse 块; 参考 config.example.yaml
-# cfg_path = os.path.join(os.path.dirname(__file__), "config.example.yaml")
-# cfg = task.connect_configuration(cfg_path, name="General")
-# hp = cfg["training"]
-# class _A: pass
-# args = _A(); [setattr(args, k, v) for k, v in hp.items()]
+# cfg = task.connect_configuration(os.path.join(os.path.dirname(__file__), "config.example.yaml"), name="General")
+# args = argparse.Namespace(**cfg["training"])   # config.example.yaml 的 key 已是下划线形式
 
 # 【平台】申请 vGPU (vgpu_memory 单位 GiB)
 task.connect({"vgpu_number": 1, "vgpu_memory": 2, "vgpu_cores": 50}, name="VGPU")
