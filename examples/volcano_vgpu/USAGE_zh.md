@@ -489,7 +489,7 @@ if int(os.environ.get("RANK", "0")) == 0:
 > kubectl get nodes -o json | jq -r '.items[] | "\(.metadata.name) nvidia.com/gpu=\(.status.allocatable["nvidia.com/gpu"]) vgpu=\(.status.allocatable["volcano.sh/vgpu-number"])"'
 > ```
 > - `nvidia.com/gpu` ≥ 1 → 用 `*-full-gpu*` values/queue，申请 `nvidia.com/gpu`。
-> - `nvidia.com/gpu=0`、只有 `vgpu`（**HAMi/vGPU-only 集群**）→ 用 `*-vgpu*` values/queue；整卡 = 静态 `volcano.sh/vgpu-cores:100 + 整卡显存`，脚本**仍不 connect(VGPU)**。
+> - `nvidia.com/gpu=0`、只有 `vgpu`（**HAMi/vGPU-only 集群**）→ 用 `*-vgpu*` values/queue；`vgpuHook` 开，脚本 `connect(VGPU)` 自定义规格（`cores:100`+整卡显存=整卡，更小=切片）。`train_launch_multinode_wholecard.py` 已内置 `--vgpu-number/--vgpu-memory/--vgpu-cores`。
 > 详见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md) §0.4。
 
 | 需求 | 做法 | 入口 |
@@ -498,7 +498,7 @@ if int(os.environ.get("RANK", "0")) == 0:
 | **PodGroup gang** + ClearML glue | PodGroup + N Task 齐入队 | `submit_multinode_podgroup.py` |
 | **Volcano Job gang**（原生 MASTER_ADDR） | `kubectl` / submit 脚本 | `submit_volcano_job_wholecard.py` |
 
-整卡队列 **`multinode-full-gpu`**（`vgpuHook: false`）；方案 1/2 **不要** `connect(VGPU)`。资源类型按上方自检：原生集群用 `nvidia.com/gpu`，HAMi 集群用静态 `volcano.sh/vgpu-*`。
+整卡队列 **`multinode-full-gpu`**。资源类型按上方自检：原生集群 `vgpuHook: false` + `nvidia.com/gpu`（方案 1/2 不 connect VGPU）；HAMi 集群 `vgpuHook: true`，脚本 `connect(VGPU)` 自定义规格（方案 1 已内置）。
 
 **逐步命令（含 kubectl / helm / 验证）见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md)**：第 0 章环境检查 → 第 1 章平台准备 → 方案 1/2/3 分章操作。  
 **方案 3b（改 Agent 生成 Volcano Job，算法只 `python train.py`）** → [`PLATFORM_scheme3b_volcano_job_agent_zh.md`](PLATFORM_scheme3b_volcano_job_agent_zh.md)。

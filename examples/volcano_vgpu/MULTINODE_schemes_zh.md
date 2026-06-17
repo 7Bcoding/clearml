@@ -88,9 +88,16 @@ kubectl get nodes -o json | jq -r '.items[] |
 | 自检结果 | 集群类型 | 用哪套文件 | 「整卡」怎么表达 |
 |----------|----------|-----------|------------------|
 | `nvidia.com/gpu` ≥ 1 | 原生 / GPU-Operator | `values-multinode-full-gpu*.yaml` + `volcano_queue_multinode_full_gpu.example.yaml` | 申请 `nvidia.com/gpu: 1` |
-| `nvidia.com/gpu=0`，只有 `vgpu` | **HAMi / vGPU-only** | `values-multinode-vgpu.standalone.example.yaml` + `volcano_queue_multinode_vgpu.example.yaml` | 静态 `volcano.sh/vgpu-number:1 + vgpu-cores:100 + vgpu-memory:<整卡GiB>` |
+| `nvidia.com/gpu=0`，只有 `vgpu` | **HAMi / vGPU-only** | `values-multinode-vgpu.standalone.example.yaml` + `volcano_queue_multinode_vgpu.example.yaml` | 每任务 `connect(VGPU)`，vgpuHook 按任务注入（`cores:100`=整卡，更小=切片） |
 
-> **HAMi 集群要点**：整卡资源**静态写在 Agent 的 basePodTemplate**（vGPU values 已写好），`vgpuHook: false`，训练脚本**仍然不 connect(VGPU)**——隔离由集群侧 HAMi webhook 按 Pod 的 `volcano.sh/vgpu-*` 执行。下文凡出现 `values-multinode-full-gpu*` / `volcano_queue_multinode_full_gpu` 的命令，HAMi 集群一律换成对应的 `*-vgpu*` 文件即可，其余步骤（label / 提交 / 验证）完全一致。
+> **HAMi 集群要点（灵活方案，推荐）**：Agent `vgpuHook: true`，资源**不写死**在模板，由 hook 读每个 Task 的 `VGPU` 段（`vgpu_number/vgpu_memory/vgpu_cores`）注入到 master 与各 worker Pod。训练脚本需 `task.connect({...}, name="VGPU")`——`train_launch_multinode_wholecard.py` 已内置 `--vgpu-number/--vgpu-memory/--vgpu-cores`，整卡填 `cores:100 + 整卡显存`，切片填更小值。隔离由集群侧 HAMi webhook 执行。
+>
+> - 若只想「每 Pod 固定整卡、脚本零改」：values 改 `vgpuHook: false` + 把 `volcano.sh/vgpu-*` 静态写进 basePodTemplate.resources。与上面的灵活方案**二选一**。
+> - 下文凡出现 `values-multinode-full-gpu*` / `volcano_queue_multinode_full_gpu` 的命令，HAMi 集群一律换成对应的 `*-vgpu*` 文件即可；label / 提交 / 验证步骤完全一致。
+> - 三方案脚本均已内置 vGPU 适配：
+>   - **方案 1 / 2**：`--vgpu-number/--vgpu-memory/--vgpu-cores` 写入 Task 的 VGPU 段，由 Agent vgpuHook 注入。方案 2 另需 `podgroup_clearml_gang_full_2_vgpu.example.yaml`（minResources 用 `volcano.sh/vgpu-number`，否则 gang 永不就绪）。
+>   - **方案 3**：`--gpu-mode vgpu`（默认）在 Job 里直接渲染 `volcano.sh/vgpu-*`，不经 hook，只需 vGPU 队列；原生集群用 `--gpu-mode nvidia`。
+>   - ⚠️ 方案 2 的 gang 还要求 Pod 带 `scheduling.k8s.io/group-name` 注解——它会让**该 Agent 的所有 Pod** 进同一 gang，与方案 1 冲突，故方案 2 建议用**独立的 gang+vgpu Agent**（values 里加回 `annotations`）。嫌麻烦就直接用方案 3 的 Volcano Job 原生 gang。
 >
 > 常见报错 `PodGroup ... overused nvidia.com/gpu`：多半是旧的 `multinode-full-gpu` 队列 capability 仍写着 `nvidia.com/gpu`。`kubectl apply` vGPU 版队列文件（同名覆盖）即可。
 

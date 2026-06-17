@@ -5,13 +5,17 @@
 
 - 本机提交 1 次；master Pod 内 launch_multi_node(N) 再入队 N-1 子 Task
 - MASTER_ADDR 由 ClearML SDK 注入（需 Helm 配 CLEARML_MULTI_NODE_MASTER_DEF_ADDR）
-- 整卡：走 multinode-full-gpu 队列，不要 connect(VGPU)
+- 资源按集群类型自适应（见 MULTINODE_schemes_zh.md §0.4）：
+  · 原生 nvidia.com/gpu 集群：Agent vgpuHook 关，下方 VGPU 段被忽略（无害）
+  · HAMi/vGPU 集群：Agent vgpuHook 开，按 VGPU 段注入每 Pod 一张卡
+    （vgpu_cores=100 + 整卡显存 = 整卡；更小的值 = 切片）
 
 前置与操作见 MULTINODE_schemes_zh.md §方案 1
 
 用法:
   python train_launch_multinode_wholecard.py --num-nodes 2
-  python train_launch_multinode_wholecard.py --num-nodes 2 --queue multinode-full-gpu
+  python train_launch_multinode_wholecard.py --num-nodes 2 --vgpu-cores 100 --vgpu-memory 24  # 整卡
+  python train_launch_multinode_wholecard.py --num-nodes 2 --vgpu-cores 30 --vgpu-memory 4    # 切片
 """
 import argparse
 import os
@@ -58,6 +62,10 @@ def main():
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--wait", action="store_true", default=True, help="master 等待 worker Task 启动")
     parser.add_argument("--no-wait", action="store_false", dest="wait")
+    # vGPU 段（HAMi 集群由 vgpuHook 注入；原生 nvidia.com/gpu 集群忽略，无害）
+    parser.add_argument("--vgpu-number", type=int, default=1, help="每 Pod 卡数（本脚本 1 进程/Pod，建议保持 1）")
+    parser.add_argument("--vgpu-memory", type=int, default=24, help="每卡显存 GiB（整卡填整卡显存，如 4090=24）")
+    parser.add_argument("--vgpu-cores", type=int, default=100, help="算力百分比（整卡=100，切片<100）")
     args = parser.parse_args()
 
     if args.num_nodes < 1:
@@ -69,6 +77,13 @@ def main():
     task.connect(
         {"total_num_nodes": args.num_nodes, "queue": args.queue, "master_port": args.master_port},
         name="launch_multi_node",
+    )
+
+    # HAMi/vGPU 集群：vgpuHook 读此段，给每个 Pod（含 worker clone）注入 volcano.sh/vgpu-*
+    # 原生 nvidia.com/gpu 集群（vgpuHook 关）会忽略此段，无害
+    task.connect(
+        {"vgpu_number": args.vgpu_number, "vgpu_memory": args.vgpu_memory, "vgpu_cores": args.vgpu_cores},
+        name="VGPU",
     )
 
     if Task.running_locally():

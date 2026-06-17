@@ -8,6 +8,10 @@ MASTER_ADDR 三种模式（写入 Multinode 段，由 train_multinode_podgroup.p
   fixed      提交时指定 --master-addr <节点 IP>（配合 hostNetwork）
   service    提交时指定 --master-addr <Service DNS>（配合 k8s/service_multinode_master.example.yaml）
 
+资源（HAMi/vGPU 集群）: --vgpu-number/memory/cores 写入每个 Task 的 VGPU 段，
+  Agent vgpuHook 注入 volcano.sh/vgpu-*；须配套 *-vgpu* values / queue / podgroup
+  （见 MULTINODE_schemes_zh.md §0.4）。原生 nvidia.com/gpu 集群（vgpuHook 关）会忽略该段。
+
 前置与操作见 MULTINODE_schemes_zh.md §方案 2
 
 用法:
@@ -77,6 +81,10 @@ def main():
     )
     p.add_argument("--project", default="volcano-vgpu")
     p.add_argument("--gang-id", default="")
+    # vGPU 段（HAMi 集群由 vgpuHook 注入；原生 nvidia.com/gpu 集群忽略，无害）
+    p.add_argument("--vgpu-number", type=int, default=1, help="每 Pod 卡数（1 进程/Pod，建议保持 1）")
+    p.add_argument("--vgpu-memory", type=int, default=24, help="每卡显存 GiB（整卡填整卡显存，如 4090=24）")
+    p.add_argument("--vgpu-cores", type=int, default=100, help="算力百分比（整卡=100，切片<100）")
     args = p.parse_args()
 
     if args.num_nodes < 2:
@@ -127,6 +135,12 @@ def main():
     _connect_multinode(master, node_rank=0, **common)
     for rank, node in enumerate(clones, start=1):
         _connect_multinode(node, node_rank=rank, **common)
+
+    # VGPU 段：master 与各 clone 都要连（clone 时 master 尚无此段，故逐个连），
+    # HAMi Agent 的 vgpuHook 按此段给每个 Pod 注入 volcano.sh/vgpu-*
+    vgpu = {"vgpu_number": args.vgpu_number, "vgpu_memory": args.vgpu_memory, "vgpu_cores": args.vgpu_cores}
+    for node in [master, *clones]:
+        node.connect(vgpu, name="VGPU")
 
     print("=== PodGroup gang enqueue (gang_id=%s) ===" % gang_id)
     print("PodGroup: %s  minMember=%s  queue=%s" % (args.podgroup, args.num_nodes, args.queue))

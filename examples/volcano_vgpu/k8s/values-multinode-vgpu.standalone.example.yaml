@@ -27,13 +27,20 @@ agentk8sglue:
   createQueueIfNotExists: false
   defaultContainerImage: nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
-  # 整卡多机用「静态 vGPU 资源」直接写在 basePodTemplate（见下方 resources），
-  # 每个 Pod 固定拿 1 张整卡（cores:100 + 整卡显存）。因此 **不依赖** clearml 的 vgpuHook
-  # 去读 Task 的 VGPU 段 —— hook 关闭，训练脚本（train_launch_multinode_wholecard.py）
-  # 也无需 connect(VGPU)。HAMi 的显存/算力隔离由集群侧 HAMi webhook 按 Pod 的
-  # volcano.sh/vgpu-* 资源执行，与 clearml hook 无关。
+  # 自定义 vGPU + 多机（灵活方案）：vgpuHook 开，读 Task 的 VGPU 段
+  # (vgpu_number / vgpu_memory / vgpu_cores) 按任务把 volcano.sh/vgpu-* 注入到
+  # 每个 Pod（master 与各 worker clone 都会注入）。资源**不写死**在 basePodTemplate，
+  # 算法工程师在脚本里 task.connect({...}, name="VGPU") 自定义：
+  #   整卡 → vgpu_cores:100 + 整卡显存；切片 → 填更小的 cores/memory。
+  # 隔离仍由集群侧 HAMi webhook 按 Pod 的 vgpu 资源执行。
+  #
+  # 另一种取向（每 Pod 固定整卡、脚本零改）：把本段设 enabled:false，并把
+  # volcano.sh/vgpu-* 静态写进下方 basePodTemplate.resources。二选一，勿同时。
   vgpuHook:
-    enabled: false
+    enabled: true
+    section: VGPU
+    gpuMemoryFactor: 1024
+    mode: hami-core
 
   extraEnvs:
     - name: "CLEARML_AGENT_NO_UPDATE"
@@ -48,17 +55,11 @@ agentk8sglue:
       # 避免 PodGroup 落到 default 队列（按 Volcano 版本二选一，无效则试 scheduling.volcano.sh/queue-name）
       volcano.sh/queue-name: multinode-full-gpu
 
+    # vGPU 资源不写死在此 —— 由 vgpuHook 按 Task 的 VGPU 段注入（每 Pod 一份）
     resources:
-      limits:
-        volcano.sh/vgpu-number: "1"
-        volcano.sh/vgpu-memory: "24"
-        volcano.sh/vgpu-cores: "100"
       requests:
         cpu: "8"
         memory: 32Gi
-        volcano.sh/vgpu-number: "1"
-        volcano.sh/vgpu-memory: "24"
-        volcano.sh/vgpu-cores: "100"
 
     env:
       - name: CLEARML_MULTI_NODE_MASTER_DEF_ADDR

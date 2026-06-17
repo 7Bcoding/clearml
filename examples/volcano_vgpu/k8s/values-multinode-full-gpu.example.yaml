@@ -4,7 +4,8 @@
 #      "\(.metadata.name) nvidia.com/gpu=\(.status.allocatable["nvidia.com/gpu"])"'
 #    若 nvidia.com/gpu=0（HAMi/vGPU-only 集群），本文件用不了 ——
 #    请改用 values-multinode-vgpu.standalone.example.yaml + volcano_queue_multinode_vgpu.example.yaml
-#    （整卡 = 静态 volcano.sh/vgpu-cores:100 + 整卡显存）。详见 MULTINODE_schemes_zh.md §0.4。
+#    （vgpuHook 开，按 Task 的 VGPU 段注入 volcano.sh/vgpu-*；cores:100+整卡显存=整卡，更小=切片）。
+#    详见 MULTINODE_schemes_zh.md §0.4。
 
 clearml:
   existingAgentk8sglueSecret: "clearml-agent-creds"

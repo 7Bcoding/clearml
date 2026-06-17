@@ -3,6 +3,9 @@
 # 推荐用 submit_volcano_job_wholecard.py 自动生成 Job 名 / ConfigMap / ClearML Task。
 # 本文件供手工 kubectl apply 或 CI 参考。
 #
+# ⚠️ 本模板用整卡 nvidia.com/gpu；HAMi/vGPU 集群（nvidia.com/gpu=0）请把下方 resources 的
+#    nvidia.com/gpu 换成 volcano.sh/vgpu-number/-memory/-cores（或直接用脚本 --gpu-mode vgpu）。
+#
 # 手工步骤:
 #   1. 替换 <JOB_NAME>、<CLEARML_TASK_ID>、<CONFIGMAP_NAME>
 #   2. kubectl create configmap <CONFIGMAP_NAME> -n clearml \
