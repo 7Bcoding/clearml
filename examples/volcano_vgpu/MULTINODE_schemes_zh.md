@@ -144,6 +144,8 @@ helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
 ```
 
 > 与现有 vGPU Agent **并存**时，使用不同 release 名（上例 `clearml-agent-multinode`），并确保 `agentk8sglue.queue: multinode-full-gpu`、`vgpuHook.enabled: false`。
+>
+> **勿设** `createQueueIfNotExists: true`（除非已升级到新版本 glue 且确认支持 `--create-queue`）。现网镜像 `allegroai/clearml-agent-k8s-base:1.24-21` **不支持**该参数，会导致 Agent CrashLoop：`unrecognized arguments: --create-queue`。ClearML 队列请用 **步骤 1.3** 手动创建。
 
 **验证 Agent**：
 
@@ -157,6 +159,27 @@ kubectl logs -n clearml deploy/clearml-agent-multinode --tail=80
 **验证 WebUI Worker**：
 
 WebUI → Workers & Queues → 队列 `multinode-full-gpu` 下应出现新 Worker（可能延迟 1–2 分钟）。
+
+### 步骤 1.4.1 Agent 报错 `unrecognized arguments: --create-queue`
+
+**原因**：Helm `createQueueIfNotExists: true` 会给 glue 加 `--create-queue`，但 **1.24-21 等旧 glue 无此 CLI**。
+
+**修复**（二选一）：
+
+```bash
+# A. 重新 helm upgrade，确保 overlay 里为 false（示例 values 已改为 false）
+helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
+  -f examples/volcano-vgpu/custom_values.yaml \
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml"
+
+# B. 或 helm upgrade 时用 --set 覆盖
+helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
+  -f examples/volcano-vgpu/custom_values.yaml \
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml" \
+  --set agentk8sglue.createQueueIfNotExists=false
+```
+
+然后按 **步骤 1.3** 在 WebUI / Python API **手动创建** ClearML 队列 `multinode-full-gpu`，再查 Agent 日志应正常监听队列。
 
 ## 步骤 1.5 确认 values 关键项（方案 1 / 2）
 

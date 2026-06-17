@@ -13,7 +13,9 @@ clearml:
 
 agentk8sglue:
   queue: multinode-full-gpu
-  createQueueIfNotExists: true
+  # 旧版 k8s-glue（如 agent-k8s-base:1.24-21）不支持 --create-queue CLI；
+  # 须 false，并在 ClearML WebUI / API 手动建同名队列（见 MULTINODE_schemes_zh.md §1.3）
+  createQueueIfNotExists: false
   defaultContainerImage: nvidia/cuda:12.4.1-runtime-ubuntu22.04
 
   vgpuHook:
