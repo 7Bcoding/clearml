@@ -133,14 +133,14 @@ print([x.name for x in api.queues.get_all()])
 
 ## 步骤 1.4 部署整卡 k8s-glue Agent（方案 1 / 2 必须）
 
-在 **`clearml-helm-charts`** 仓库执行（先按环境改 values 里的 `NCCL_SOCKET_IFNAME`、`nodeSelector`）：
+在 **`clearml-helm-charts`** 仓库执行（先按环境改 values 里的 URL、`NCCL_SOCKET_IFNAME`、`nodeSelector`）：
 
 ```bash
 cd "$HELM_REPO"
 
+# ⚠️ 不要用 -f custom_values.yaml 叠加！会混入 vGPU limits 导致 Pod Unschedulable
 helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml"
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.standalone.example.yaml"
 ```
 
 > 与现有 vGPU Agent **并存**时，使用不同 release 名（上例 `clearml-agent-multinode`），并确保 `agentk8sglue.queue: multinode-full-gpu`、`vgpuHook.enabled: false`。
