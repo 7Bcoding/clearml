@@ -1,47 +1,66 @@
-# 整卡多机：方案 1 / 2 / 3 操作手册
+# 多机多卡训练：ClearML 冒烟 + Volcano Job 推荐路线
 
-**场景**：2+ 节点 × 每 Pod 1 张整卡（`nvidia.com/gpu`），暂不做 vGPU 切分。
+本文档面向当前集群形态：
 
-**路径约定**（下文命令在 **ClearML SDK 仓库根目录** 执行，或把路径换成你的绝对路径）：
+- K3s + containerd
+- Volcano scheduler
+- `volcano-vgpu-device-plugin` / HAMi-core
+- GPU 节点以 `volcano.sh/vgpu-*` 暴露资源，`nvidia.com/gpu` 可能为 0
+- NVIDIA runtime 使用 CDI，训练 Pod 保留 `runtimeClassName: nvidia`
+- `volcano-vgpu-device-plugin` 不强制开启 `cdi.enabled=true`
+
+当前只保留两条路线：
+
+| 路线 | 用途 | gang | 是否经过 ClearML Agent |
+|---|---|---:|---:|
+| 方案 1：`launch_multi_node` | ClearML 原生多机冒烟、验证 NCCL 与队列 | 否 | 是 |
+| 方案 3：Volcano Job | 推荐的 gang 调度与生产化方向 | 是 | 否 |
+
+旧的「PodGroup + N 个 ClearML Task」路线已移除。原因是它需要静态 PodGroup、Agent 模板注解和任务数量严格一致；并发、重试、不同节点数任务都会变得脆弱。需要 gang 时优先走 Volcano Job。
+
+---
+
+## 0. 路径约定
+
+Linux / macOS：
 
 ```bash
-# Linux / macOS
 export CLEARML_REPO=/path/to/clearml
 export HELM_REPO=/path/to/clearml-helm-charts
 cd "$CLEARML_REPO/examples/volcano_vgpu"
+```
 
-# Windows PowerShell
+Windows PowerShell：
+
+```powershell
 $env:CLEARML_REPO = "D:\Python\clearml"
 $env:HELM_REPO = "D:\Python\clearml-helm-charts"
 cd "$env:CLEARML_REPO\examples\volcano_vgpu"
 ```
 
-**命名空间**：以下默认 `clearml`，若不同请全局替换。
+以下默认命名空间为 `clearml`。
 
 ---
 
-## 文件清单
+## 1. 文件清单
 
-| 文件 | 方案 | 作用 |
-|------|------|------|
-| `train_launch_multinode_wholecard.py` | 1 | 提交 + Pod 内 `launch_multi_node` + NCCL 冒烟 |
-| `submit_multinode_podgroup.py` | 2 | 本地 N Task 齐入队 |
-| `train_multinode_podgroup.py` | 2 | Pod 内 NCCL 冒烟（三种 MASTER_ADDR 模式） |
-| `submit_volcano_job_wholecard.py` | 3 | 创建 Task + ConfigMap + Volcano Job |
-| `train_volcano_job_smoke.py` | 3 | Job Pod 内 NCCL 冒烟 |
-| `k8s/volcano_queue_multinode_full_gpu.example.yaml` | 共用 | Volcano Queue CR |
-| `k8s/values-multinode-full-gpu.example.yaml` | 1+2 | 整卡 glue Agent values |
-| `k8s/values-multinode-full-gpu-hostnetwork.example.yaml` | 2-A | hostNetwork 叠加 |
-| `k8s/podgroup_clearml_gang_full_2.example.yaml` | 2 | PodGroup CR |
-| `k8s/service_multinode_master.example.yaml` | 2-C | Headless Service + Endpoints |
-| `k8s/values-multinode-podgroup-service.example.yaml` | 2-C | 可选 env `MULTINODE_MASTER_ADDR` |
-| `k8s/volcano_job_wholecard_gang.example.yaml` | 3 | Volcano Job 静态模板 |
+| 文件 | 用途 |
+|---|---|
+| `train_launch_multinode_wholecard.py` | 方案 1：ClearML `launch_multi_node` 冒烟 |
+| `submit_volcano_job_wholecard.py` | 方案 3：生成 ConfigMap + Volcano Job |
+| `train_volcano_job_smoke.py` | 方案 3：Job Pod 内 NCCL 冒烟入口 |
+| `k8s/values-multinode-vgpu.standalone.example.yaml` | 方案 1：HAMi/vGPU ClearML Agent values |
+| `k8s/volcano_queue_multinode_vgpu.example.yaml` | HAMi/vGPU Volcano Queue |
+| `k8s/volcano_job_wholecard_gang.example.yaml` | 方案 3：静态 Volcano Job 模板 |
+| `k8s/CLEARML_K3S_VOLCANO_VGPU_DEPLOYMENT_zh.md` | 当前完整部署指南 |
+
+仍保留在仓库里的 `full-gpu`、`podgroup`、`service` 示例只作为历史/对照材料；当前 HAMi/vGPU 路线不要照它们操作。
 
 ---
 
-# 第 0 章：环境检查（所有方案先做）
+## 2. 平台前置检查
 
-## 0.1 本机工具
+### 2.1 基础工具
 
 ```bash
 kubectl version --client
@@ -49,98 +68,116 @@ kubectl cluster-info
 helm version
 python --version
 pip show clearml
-clearml-init   # 若未配置，按提示填 Server / Web / API / 凭证
 ```
 
-**验证 ClearML 连通**：
+ClearML 本地连通性只影响方案 1，以及方案 3 的可选 WebUI scalar：
 
 ```bash
 python -c "from clearml.backend_api.session.client import APIClient; print('OK', APIClient().users.get_current_user())"
 ```
 
-## 0.2 集群组件
+### 2.2 Volcano 组件
 
 ```bash
 kubectl get pods -n volcano-system
 kubectl get crd | grep volcano
+kubectl get crd jobs.batch.volcano.sh queues.scheduling.volcano.sh
 ```
 
-应能看到 Volcano 控制器 Running，且存在 `queues.scheduling.volcano.sh`、`jobs.batch.volcano.sh` 等 CRD。
+必须能看到 Volcano scheduler/controller Running，并存在 `jobs.batch.volcano.sh`、`queues.scheduling.volcano.sh`。
 
-## 0.3 GPU 节点与容量（至少 2 张整卡、最好在 2 台不同节点）
-
-```bash
-kubectl get nodes -o wide
-kubectl get nodes -o custom-columns=NAME:.metadata.name,GPU:.status.capacity.nvidia\\.com/gpu
-```
-
-记录节点名，后文替换 `<GPU_NODE_A>`、`<GPU_NODE_B>`。
-
-## 0.4 GPU 资源类型自检（决定走哪套 values / queue —— 必做）
-
-整卡多机有两种资源暴露方式，**先确认你的集群是哪种**，否则 Pod 会一直 `Unschedulable`：
+### 2.3 GPU 资源类型
 
 ```bash
 kubectl get nodes -o json | jq -r '.items[] |
-  "\(.metadata.name)  nvidia.com/gpu=\(.status.allocatable["nvidia.com/gpu"])  vgpu=\(.status.allocatable["volcano.sh/vgpu-number"])"'
+  "\(.metadata.name) nvidia.com/gpu=\(.status.allocatable["nvidia.com/gpu"]) vgpu-number=\(.status.allocatable["volcano.sh/vgpu-number"]) vgpu-memory=\(.status.allocatable["volcano.sh/vgpu-memory"]) vgpu-cores=\(.status.allocatable["volcano.sh/vgpu-cores"])"'
 ```
 
-| 自检结果 | 集群类型 | 用哪套文件 | 「整卡」怎么表达 |
-|----------|----------|-----------|------------------|
-| `nvidia.com/gpu` ≥ 1 | 原生 / GPU-Operator | `values-multinode-full-gpu*.yaml` + `volcano_queue_multinode_full_gpu.example.yaml` | 申请 `nvidia.com/gpu: 1` |
-| `nvidia.com/gpu=0`，只有 `vgpu` | **HAMi / vGPU-only** | `values-multinode-vgpu.standalone.example.yaml` + `volcano_queue_multinode_vgpu.example.yaml` | 每任务 `connect(VGPU)`，vgpuHook 按任务注入（`cores:100`=整卡，更小=切片） |
+当前推荐状态：
 
-> **HAMi 集群要点（灵活方案，推荐）**：Agent `vgpuHook: true`，资源**不写死**在模板，由 hook 读每个 Task 的 `VGPU` 段（`vgpu_number/vgpu_memory/vgpu_cores`）注入到 master 与各 worker Pod。训练脚本需 `task.connect({...}, name="VGPU")`——`train_launch_multinode_wholecard.py` 已内置 `--vgpu-number/--vgpu-memory/--vgpu-cores`，整卡填 `cores:100 + 整卡显存`，切片填更小值。隔离由集群侧 HAMi webhook 执行。
->
-> - 若只想「每 Pod 固定整卡、脚本零改」：values 改 `vgpuHook: false` + 把 `volcano.sh/vgpu-*` 静态写进 basePodTemplate.resources。与上面的灵活方案**二选一**。
-> - 下文凡出现 `values-multinode-full-gpu*` / `volcano_queue_multinode_full_gpu` 的命令，HAMi 集群一律换成对应的 `*-vgpu*` 文件即可；label / 提交 / 验证步骤完全一致。
-> - 三方案脚本均已内置 vGPU 适配：
->   - **方案 1 / 2**：`--vgpu-number/--vgpu-memory/--vgpu-cores` 写入 Task 的 VGPU 段，由 Agent vgpuHook 注入。方案 2 另需 `podgroup_clearml_gang_full_2_vgpu.example.yaml`（minResources 用 `volcano.sh/vgpu-number`，否则 gang 永不就绪）。
->   - **方案 3**：`--gpu-mode vgpu`（默认）在 Job 里直接渲染 `volcano.sh/vgpu-*`，不经 hook，只需 vGPU 队列；原生集群用 `--gpu-mode nvidia`。
->   - ⚠️ 方案 2 的 gang 还要求 Pod 带 `scheduling.k8s.io/group-name` 注解——它会让**该 Agent 的所有 Pod** 进同一 gang，与方案 1 冲突，故方案 2 建议用**独立的 gang+vgpu Agent**（values 里加回 `annotations`）。嫌麻烦就直接用方案 3 的 Volcano Job 原生 gang。
->
-> 常见报错 `PodGroup ... overused nvidia.com/gpu`：多半是旧的 `multinode-full-gpu` 队列 capability 仍写着 `nvidia.com/gpu`。`kubectl apply` vGPU 版队列文件（同名覆盖）即可。
+```text
+nvidia.com/gpu=0 或不用它
+volcano.sh/vgpu-number 有值
+volcano.sh/vgpu-memory 有值
+volcano.sh/vgpu-cores 有值
+```
+
+在这种集群里，「每 Pod 一张整卡」表达为：
+
+```yaml
+volcano.sh/vgpu-number: "1"
+volcano.sh/vgpu-memory: "24"   # 4090 示例；A100-80G 改 80
+volcano.sh/vgpu-cores: "100"
+```
+
+### 2.4 Runtime CDI 状态
+
+每个 GPU 节点检查：
+
+```bash
+nvidia-smi -L
+sudo nvidia-ctk --debug cdi list
+sudo grep -R "mode\|default-kind\|management.nvidia\|nvidia.com/gpu" \
+  /etc/nvidia-container-runtime \
+  /usr/local/nvidia/toolkit/.config/nvidia-container-runtime \
+  /etc/cdi /var/run/cdi 2>/dev/null
+```
+
+当前建议：
+
+```text
+runtime mode = cdi
+runtime default-kind 与 nvidia-ctk --debug cdi list 输出一致
+当前环境通常是 management.nvidia.com/gpu
+```
+
+注意：这里要求的是 NVIDIA runtime CDI 正常，不要求 `volcano-vgpu-device-plugin cdi.enabled=true`。插件继续负责 `volcano.sh/vgpu-*` 调度与 HAMi-core 注入。
 
 ---
 
-# 第 1 章：共用平台准备（方案 1 / 2 必须；方案 3 需要 Queue + 节点 label）
+## 3. 共用平台准备
 
-## 步骤 1.1 给 GPU 节点打 label
+### 3.1 给 GPU 节点打 label
 
 ```bash
-kubectl label node <GPU_NODE_A> gpu.present=true --overwrite
-kubectl label node <GPU_NODE_B> gpu.present=true --overwrite
-kubectl get nodes -l gpu.present=true
+kubectl label node gpu-server-5 gpu.present=true --overwrite
+kubectl label node gpu-server-6 gpu.present=true --overwrite
+kubectl get nodes -l gpu.present=true -o wide
 ```
 
-## 步骤 1.2 创建 Volcano Queue
+### 3.2 创建 Volcano Queue
 
-**方法 A：kubectl（推荐）**
+HAMi/vGPU 集群使用 vGPU 版队列：
 
 ```bash
-kubectl apply -f k8s/volcano_queue_multinode_full_gpu.example.yaml
+cd "$CLEARML_REPO/examples/volcano_vgpu"
+kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
 kubectl get queue multinode-full-gpu
 kubectl describe queue multinode-full-gpu
 ```
 
-**方法 B：Volcano WebUI / vcctl**（若集群已装）
+验证 `capability` 里是 `volcano.sh/vgpu-*`，不是 `nvidia.com/gpu`：
 
 ```bash
-# 视安装情况可选
-vcctl queue create --name multinode-full-gpu --weight 1
-vcctl queue list
+kubectl describe queue multinode-full-gpu | egrep -i 'volcano.sh/vgpu|nvidia.com/gpu'
 ```
 
-**验证**：`capability` 中 `nvidia.com/gpu` ≥ 2。
+如果看到 `nvidia.com/gpu`，说明误用了原生整卡队列文件，需要重新 apply vGPU 版队列。
 
-## 步骤 1.3 创建 ClearML Queue
+---
 
-**方法 A：WebUI**
+## 4. 方案 1：ClearML `launch_multi_node` 冒烟
 
-1. 打开 ClearML WebUI → **Workers & Queues**
-2. **+ NEW QUEUE** → 名称填 `multinode-full-gpu` → 保存
+方案 1 用来验证 ClearML 队列、k8s-glue、runtime CDI、vGPU 注入和 NCCL 基本链路。它不是 gang 调度，master Pod 通常先启动，worker Pod 后启动。
 
-**方法 B：Python（可脚本化）**
+### 4.1 创建 ClearML Queue
+
+WebUI：
+
+1. Workers & Queues
+2. 新建队列 `multinode-full-gpu`
+
+或 Python：
 
 ```bash
 python -c "
@@ -156,359 +193,240 @@ print([x.name for x in api.queues.get_all()])
 "
 ```
 
-## 步骤 1.4 部署整卡 k8s-glue Agent（方案 1 / 2 必须）
+### 4.2 部署 multinode Agent
 
-在 **`clearml-helm-charts`** 仓库执行（先按环境改 values 里的 URL、`NCCL_SOCKET_IFNAME`、`nodeSelector`）：
+在 Helm chart 仓库执行：
 
 ```bash
 cd "$HELM_REPO"
 
-# ⚠️ 不要用 -f custom_values.yaml 叠加！会混入 vGPU limits 导致 Pod Unschedulable
 helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.standalone.example.yaml"
-```
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml"
 
-> 与现有 vGPU Agent **并存**时，使用不同 release 名（上例 `clearml-agent-multinode`），并确保 `agentk8sglue.queue: multinode-full-gpu`、`vgpuHook.enabled: false`。
->
-> **勿设** `createQueueIfNotExists: true`（除非已升级到新版本 glue 且确认支持 `--create-queue`）。现网镜像 `allegroai/clearml-agent-k8s-base:1.24-21` **不支持**该参数，会导致 Agent CrashLoop：`unrecognized arguments: --create-queue`。ClearML 队列请用 **步骤 1.3** 手动创建。
-
-**验证 Agent**：
-
-```bash
-kubectl get pods -n clearml | grep agent
+kubectl rollout status deploy/clearml-agent-multinode -n clearml
 kubectl logs -n clearml deploy/clearml-agent-multinode --tail=80
 ```
 
-日志中应出现监听队列 **`multinode-full-gpu`**；不应再 patch vgpu limits。
+关键 values 应为：
 
-**验证 WebUI Worker**：
-
-WebUI → Workers & Queues → 队列 `multinode-full-gpu` 下应出现新 Worker（可能延迟 1–2 分钟）。
-
-### 步骤 1.4.1 Agent 报错 `unrecognized arguments: --create-queue`
-
-**原因**：Helm `createQueueIfNotExists: true` 会给 glue 加 `--create-queue`，但 **1.24-21 等旧 glue 无此 CLI**。
-
-**修复**（二选一）：
-
-```bash
-# A. 重新 helm upgrade，确保 overlay 里为 false（示例 values 已改为 false）
-helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml"
-
-# B. 或 helm upgrade 时用 --set 覆盖
-helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml" \
-  --set agentk8sglue.createQueueIfNotExists=false
+```yaml
+agentk8sglue:
+  queue: multinode-full-gpu
+  createQueueIfNotExists: false
+  vgpuHook:
+    enabled: true
+  basePodTemplate:
+    schedulerName: volcano
+    runtimeClassName: nvidia
+    annotations:
+      volcano.sh/vgpu-mode: hami-core
+      volcano.sh/queue-name: multinode-full-gpu
 ```
 
-然后按 **步骤 1.3** 在 WebUI / Python API **手动创建** ClearML 队列 `multinode-full-gpu`，再查 Agent 日志应正常监听队列。
+不要叠加 `examples/volcano-vgpu/custom_values.yaml`，避免把单机队列配置混入 multinode Agent。
 
-## 步骤 1.5 确认 values 关键项（方案 1 / 2）
-
-```bash
-grep -E "group-name|CLEARML_MULTI_NODE|MY_POD_IP|vgpuHook|nvidia.com/gpu" \
-  "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml"
-```
-
-应包含：
-
-- `vgpuHook.enabled: false`
-- `nvidia.com/gpu: "1"`
-- `scheduling.k8s.io/group-name: clearml-gang-full-2`（方案 2 用）
-- `CLEARML_MULTI_NODE_MASTER_DEF_ADDR`（方案 1 用）
-- `MY_POD_IP`（方案 2 task-poll 用）
-
----
-
-# 方案 1：`launch_multi_node`（ClearML 原生，无 gang）
-
-**不需要** PodGroup。需要 **步骤 1.1–1.4** 全部完成。
-
-## 步骤 1.1 提交任务
+### 4.3 提交冒烟任务
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
-python train_launch_multinode_wholecard.py --num-nodes 2 --queue multinode-full-gpu
+python train_launch_multinode_wholecard.py \
+  --num-nodes 2 \
+  --queue multinode-full-gpu \
+  --vgpu-number 1 \
+  --vgpu-memory 24 \
+  --vgpu-cores 100
 ```
 
-记录终端输出的 Task id（master）。
-
-## 步骤 1.2 观察 ClearML WebUI
-
-1. WebUI → 项目 **volcano-vgpu**
-2. 找到任务名含 `multinode-launch-wholecard` 的 **master Task**
-3. 等待出现 **N−1 个子 Task**（`multi_node_instance` 标签）
-4. master Task → **SCALARS** → `smoke/allreduce_sum` 应为 **3.0**（2 节点）
-5. **CONFIGURATION** → `allreduce_ok` = 1
-
-## 步骤 1.3 观察 K8s Pod（非 gang：先后 Running）
+验证：
 
 ```bash
 kubectl get pods -n clearml -o wide --sort-by=.metadata.creationTimestamp
-kubectl logs -n clearml <master-pod-name> --tail=50
-kubectl logs -n clearml <worker-pod-name> --tail=50
+kubectl logs -n clearml <master-pod-name> --tail=80
+kubectl logs -n clearml <worker-pod-name> --tail=80
 ```
 
-**预期**：master Pod 往往 **先** Running，worker Pod **后** 创建并 Running（不是齐射）。
-
-## 步骤 1.4 验证 NCCL 环境变量（可选）
-
-在 master Pod 日志中应看到类似：
+ClearML WebUI 中 master Task 应看到：
 
 ```text
-MASTER_ADDR=10.x.x.x  RANK=0  WORLD_SIZE=2
-all_reduce sum=3.0 expected=3.0 ok=True
+smoke/allreduce_sum = 3.0
+allreduce_ok = 1
 ```
 
-## 步骤 1.5 NCCL 跨节点失败时的修复
+### 4.4 方案 1 常见问题
 
-**方法 A：改网卡名**（编辑 values 后重新 helm upgrade）
+`unresolvable CDI devices management.nvidia.com/gpu=GPU-...`：
 
 ```bash
-# 查 K3s 默认网卡
+kubectl get pod <pod> -n clearml -o yaml | egrep -i 'runtimeClassName|volcano.sh/vgpu|NVIDIA_VISIBLE_DEVICES|management.nvidia'
+sudo nvidia-ctk --debug cdi list
+```
+
+修 runtime CDI，不要删除 CDI 文件后继续跑。确认两台 GPU 节点都能列出本机 GPU UUID，且 runtime `default-kind` 与 `cdi list` 一致。
+
+`PodGroup ... unschedulable`：
+
+方案 1 不依赖手工 PodGroup。若事件里出现自动 PodGroup，优先看真正失败的训练 Pod 事件，通常是 worker 容器创建失败后的连带现象。
+
+NCCL 跨节点失败：
+
+```bash
 kubectl exec -n clearml deploy/clearml-agent-multinode -- ip route
-
-# 修改 k8s/values-multinode-full-gpu.example.yaml 中 NCCL_SOCKET_IFNAME 后：
-cd "$HELM_REPO"
-helm upgrade clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml"
+kubectl -n clearml exec <pod> -- ip addr
 ```
 
-**方法 B：叠加 hostNetwork**（与方案 2-A 相同 overlay）
+如实际网卡不是 `eth0`，修改 `values-multinode-vgpu.standalone.example.yaml` 中的：
 
-```bash
-helm upgrade clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml" \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu-hostnetwork.example.yaml"
+```yaml
+- name: NCCL_SOCKET_IFNAME
+  value: "<实际网卡名>"
 ```
 
-然后 **重新提交** 步骤 1.1。
+然后重新 `helm upgrade` 并重提任务。
 
 ---
 
-# 方案 2：PodGroup gang + N Task 齐入队
+## 5. 方案 3：Volcano Job gang 推荐路线
 
-需要 **第 1 章全部** + 下面 PodGroup 步骤。  
-**MASTER_ADDR** 三选一（建议先试 **B task-poll**）。
+方案 3 是当前推荐的 gang 路线。它绕过 ClearML k8s-glue，直接创建 Volcano Job：
 
-## 步骤 2.1 创建 PodGroup
-
-```bash
-cd "$CLEARML_REPO/examples/volcano_vgpu"
-kubectl apply -f k8s/podgroup_clearml_gang_full_2.example.yaml
-kubectl get podgroup clearml-gang-full-2 -n clearml
-kubectl describe podgroup clearml-gang-full-2 -n clearml
+```text
+submit_volcano_job_wholecard.py
+  -> 创建可选 ClearML Task
+  -> 创建 ConfigMap，挂载 train_volcano_job_smoke.py
+  -> 创建 Volcano Job
+  -> Volcano env/svc 插件注入 rank 与 DNS
+  -> 每个 Pod 申请 volcano.sh/vgpu-*，runtimeClassName=nvidia
 ```
 
-确认 `Spec.MinMember: 2`、`Spec.Queue: multinode-full-gpu`。
+### 5.1 可行性结论
 
-## 步骤 2.2 确认 Agent Pod 模板带 group-name 注解
+当前方案 3 **可行，但定位是平台提交器/冒烟器，不是完整 ClearML Agent 替代品**。
 
-```bash
-# 任选一个近期 clearml task pod（或等提交后再查）
-kubectl get pods -n clearml -o yaml | grep -A2 "group-name"
-```
+已经满足的条件：
 
-应看到 `scheduling.k8s.io/group-name: clearml-gang-full-2`。若无，重新 **步骤 1.4** helm upgrade。
+- `submit_volcano_job_wholecard.py` 默认 `--gpu-mode vgpu`，渲染 `volcano.sh/vgpu-*`
+- Job Pod 使用 `schedulerName: volcano`
+- Job Pod 使用 `runtimeClassName: nvidia`，匹配当前 runtime CDI 路线
+- `train_volcano_job_smoke.py` 严格要求 CUDA 可用，不再静默退回 CPU
+- ClearML scalar 上报是弱集成；没有凭证时不会影响 NCCL 冒烟
+- 默认镜像已改为 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`，避免 `nvidia/cuda:runtime` 中缺 Python/pip/torch 的问题
 
----
+必须现场验证的条件：
 
-## 步骤 2.B 提交：MASTER_ADDR 补法 B — task-poll（默认）
+| 条件 | 验证命令 |
+|---|---|
+| Volcano Job CRD 存在 | `kubectl get crd jobs.batch.volcano.sh` |
+| env/svc 插件生效 | Pod 内有 `VK_TASK_INDEX` 或 `VC_TASK_INDEX`；`MASTER_ADDR` 可解析 |
+| Queue 是 vGPU 版 | `kubectl describe queue multinode-full-gpu` |
+| 两台节点 runtime CDI 正常 | `sudo nvidia-ctk --debug cdi list` |
+| PyTorch 镜像可拉取 | `kubectl describe pod <job-pod> -n clearml` |
+| NCCL 网卡正确 | Pod 日志和 `NCCL_SOCKET_IFNAME` |
 
-```bash
-cd "$CLEARML_REPO/examples/volcano_vgpu"
-python submit_multinode_podgroup.py --num-nodes 2 --queue multinode-full-gpu --master-addr-mode task-poll
-```
+### 5.2 方案 3 当前边界
 
-记录输出的 `Master task (rank0): <task-id>` 与 `gang_id`。
+方案 3a 当前只解决：
 
-**观察 gang**：
+- gang 齐射
+- 每 Pod 一进程
+- vGPU 整卡或切片资源申请
+- NCCL all-reduce 冒烟
+- 可选 ClearML Task 指标
 
-```bash
-kubectl get podgroup clearml-gang-full-2 -n clearml -o wide
-kubectl get pods -n clearml -o wide | grep podgroup-gang
-kubectl describe pod <pod-name> -n clearml | grep -E "group-name|nvidia.com/gpu"
-```
+它暂不解决：
 
-**预期**：2 Pod 先 **Pending**，资源满足后 **几乎同时 Running**；limits 为 `nvidia.com/gpu: 1`（无 vgpu 注解）。
+- ClearML Agent 的自动代码打包、依赖复现、docker build
+- 数据集、PVC、Secrets、环境变量的通用模板化
+- 多角色 Job，例如 master/worker/evaluator 分离
+- 每 Pod 多 GPU / 每 Pod 多进程 `torchrun --nproc_per_node`
+- 失败重试后的 ClearML 状态自动同步
 
-**WebUI 验证**：
+这些属于后面的生产化开发计划。
 
-```bash
-# 将 <master-task-id> 换成 submit 输出
-# WebUI 打开该 Task → SCALARS → smoke/allreduce_sum = 3.0
-```
-
-**日志**：
-
-```bash
-kubectl logs -n clearml <rank0-pod> --tail=80
-kubectl logs -n clearml <rank1-pod> --tail=80
-```
-
----
-
-## 步骤 2.A 提交：MASTER_ADDR 补法 A — fixed（hostNetwork + 节点 IP）
-
-### 2.A.1 固定 rank0 节点
-
-```bash
-kubectl label node <GPU_NODE_A> multinode.master=true --overwrite
-kubectl get nodes -l multinode.master=true -o wide
-```
-
-查节点 IP：
-
-```bash
-kubectl get node <GPU_NODE_A> -o jsonpath='{.status.addresses[?(@.type=="InternalIP")].address}{"\n"}'
-# 记下，例如 10.0.1.11
-```
-
-### 2.A.2 Helm 叠加 hostNetwork
-
-```bash
-cd "$HELM_REPO"
-helm upgrade clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml" \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu-hostnetwork.example.yaml"
-kubectl rollout status deploy/clearml-agent-multinode -n clearml
-```
-
-### 2.A.3 提交
-
-```bash
-cd "$CLEARML_REPO/examples/volcano_vgpu"
-python submit_multinode_podgroup.py --num-nodes 2 --queue multinode-full-gpu \
-  --master-addr-mode fixed --master-addr 10.0.1.11
-```
-
-验证命令同 **步骤 2.B**（gang + scalar 3.0）。
-
----
-
-## 步骤 2.C 提交：MASTER_ADDR 补法 C — Service DNS
-
-### 2.C.1 编辑 Service / Endpoints
-
-编辑 `k8s/service_multinode_master.example.yaml`，将 `10.0.1.11` 改为 rank0 **节点 IP**（常与 2.A 相同）。
-
-```bash
-cd "$CLEARML_REPO/examples/volcano_vgpu"
-kubectl apply -f k8s/service_multinode_master.example.yaml
-kubectl get svc,endpoints clearml-multinode-master -n clearml
-```
-
-### 2.C.2 （可选）Helm 注入 env
-
-```bash
-cd "$HELM_REPO"
-helm upgrade clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-full-gpu.example.yaml" \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-podgroup-service.example.yaml"
-```
-
-### 2.C.3 提交
-
-```bash
-cd "$CLEARML_REPO/examples/volcano_vgpu"
-python submit_multinode_podgroup.py --num-nodes 2 --queue multinode-full-gpu \
-  --master-addr-mode service \
-  --master-addr clearml-multinode-master.clearml.svc.cluster.local
-```
-
-**DNS 解析验证**（在任意训练 Pod 内）：
-
-```bash
-kubectl exec -n clearml <pod-name> -- getent hosts clearml-multinode-master.clearml.svc.cluster.local
-```
-
-验证命令同 **步骤 2.B**。
-
----
-
-## 方案 2 故障排查命令
-
-| 现象 | 命令 |
-|------|------|
-| PodGroup 状态 | `kubectl describe podgroup clearml-gang-full-2 -n clearml` |
-| 队列资源 | `kubectl describe queue multinode-full-gpu` |
-| Pod 调度事件 | `kubectl describe pod <pod> -n clearml` |
-| NCCL 日志 | `kubectl logs <pod> -n clearml \| grep -i nccl` |
-| 是否误走 vgpu | `kubectl get pod <pod> -n clearml -o jsonpath='{.spec.containers[0].resources}'` |
-
----
-
-# 方案 3：Volcano Job（原生 gang + 原生 MASTER_ADDR）
-
-| | 3a（本节，现仓库） | 3b（改 Agent，算法最省心） |
-|---|-------------------|---------------------------|
-| 提交 | `submit_volcano_job_wholecard.py` / kubectl | **`python train.py` + `execute_remotely` 一次** |
-| 改 helm | ❌ | ✅（见 [`PLATFORM_scheme3b_volcano_job_agent_zh.md`](PLATFORM_scheme3b_volcano_job_agent_zh.md)） |
-| 工作量 | 0（已可用） | 约 **2 人周（M1）** / **3–5 人周（M1+M2 生产化）** |
-
-**不需要** ClearML glue Agent 监听队列来跑 **3a** Job，但需要：
-
-- **步骤 1.1**（节点 label）
-- **步骤 1.2**（Volcano Queue `multinode-full-gpu`）
-- 本机 **kubectl** 可用
-- （可选）**步骤 0.1** ClearML 连通，用于 rank0 写 scalar
-
-**不需要** PodGroup CR、**不需要** 步骤 1.4 glue Agent（除非同时跑方案 1/2）。
-
----
-
-## 步骤 3.A 辅助脚本提交（推荐）
-
-### 3.A.1 预览生成的 YAML
+### 5.3 预览 Volcano Job
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
 python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
 ```
 
-### 3.A.2 一键 apply
+默认生成 HAMi/vGPU Job：
 
-```bash
-python submit_volcano_job_wholecard.py --num-nodes 2 --apply
+```yaml
+runtimeClassName: nvidia
+resources:
+  limits:
+    volcano.sh/vgpu-number: "1"
+    volcano.sh/vgpu-memory: "24"
+    volcano.sh/vgpu-cores: "100"
 ```
 
-终端会打印 **ClearML Task id** 与 **Job 名**（如 `clearml-vjob-abc12345`），请记录。
-
-### 3.A.3 观察 Job / Pod（gang 齐射）
+### 5.4 提交 gang 冒烟
 
 ```bash
-export JOB_NAME=clearml-vjob-abc12345   # 换成你的
+python submit_volcano_job_wholecard.py \
+  --num-nodes 2 \
+  --apply
+```
+
+如果要测试切片：
+
+```bash
+python submit_volcano_job_wholecard.py \
+  --num-nodes 2 \
+  --apply \
+  --vgpu-memory 4 \
+  --vgpu-cores 30
+```
+
+如果要写 ClearML WebUI scalar：
+
+```bash
+python submit_volcano_job_wholecard.py \
+  --num-nodes 2 \
+  --apply \
+  --with-clearml-task
+```
+
+注意：`--with-clearml-task` 只是创建 Task 并把 ID 注入 Job。Pod 内仍需要能访问 ClearML Server，且镜像内有 ClearML 包，或你自行扩展镜像/命令安装它。否则脚本只打印 warning，不影响 NCCL 冒烟。
+
+### 5.5 观察 Job
+
+```bash
+export JOB_NAME=clearml-vjob-xxxxxxxx
 
 kubectl get job "$JOB_NAME" -n clearml
 kubectl get pods -n clearml -l volcano.sh/job-name="$JOB_NAME" -o wide -w
+kubectl get podgroup -n clearml | grep "$JOB_NAME"
 ```
 
-**预期**：2 Pod 同时 Pending → 同时 Running。
+预期：
 
-### 3.A.4 看日志
+```text
+2 个 Pod 同时 Pending
+资源满足后同时 Running
+日志出现 rank=0/rank=1 DONE ok=True
+allreduce sum=3.0
+```
+
+查看日志：
 
 ```bash
-kubectl logs -n clearml -l volcano.sh/job-name="$JOB_NAME" --all-containers --prefix --tail=80
-# 或分别看 rank0 / rank1
-kubectl get pods -n clearml -l volcano.sh/job-name="$JOB_NAME" -o name
-kubectl logs -n clearml <job-name>-worker-0-xxx --tail=80
-kubectl logs -n clearml <job-name>-worker-1-xxx --tail=80
+kubectl logs -n clearml -l volcano.sh/job-name="$JOB_NAME" --all-containers --prefix --tail=120
 ```
 
-日志应含：`rank=0 DONE ok=True sum=3.0`、`MASTER_ADDR=<job-name>-worker-0.<job-name>`（svc 插件 hostname.subdomain）。
+### 5.6 验证 vGPU/CDI 注入
 
-### 3.A.5 WebUI 验证（若未加 --no-clearml-task）
+```bash
+POD=$(kubectl get pods -n clearml -l volcano.sh/job-name="$JOB_NAME" -o jsonpath='{.items[0].metadata.name}')
 
-打开步骤 3.A.2 打印的 Task id → **SCALARS** → `smoke/allreduce_sum` = **3.0**。
+kubectl get pod "$POD" -n clearml -o yaml | egrep -i 'runtimeClassName|volcano.sh/vgpu|NVIDIA_VISIBLE_DEVICES|LD_PRELOAD|MASTER_ADDR|VK_TASK_INDEX|VC_TASK_INDEX'
+kubectl exec -n clearml "$POD" -- python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+kubectl exec -n clearml "$POD" -- getent hosts "$JOB_NAME-worker-0.$JOB_NAME"
+```
 
-### 3.A.6 清理
+如果 `torch.cuda.is_available()` 为 `False`，不要继续看 NCCL，先修 runtime CDI / vGPU 注入。
+
+### 5.7 清理
 
 ```bash
 kubectl delete job "$JOB_NAME" -n clearml
@@ -517,106 +435,171 @@ kubectl delete configmap "${JOB_NAME}-script" -n clearml
 
 ---
 
-## 步骤 3.B 手工 kubectl 提交
+## 6. 方案 3 故障排查
 
-### 3.B.1 创建 ClearML Task（可选，用于 rank0 日志）
+| 现象 | 优先检查 |
+|---|---|
+| Job 创建失败 | `kubectl describe job "$JOB_NAME" -n clearml` |
+| Pod 一直 Pending | Queue capability、节点 `volcano.sh/vgpu-*` allocatable |
+| gang 不齐射 | `kubectl get podgroup -n clearml | grep "$JOB_NAME"` |
+| `rank env missing` | Volcano `env` 插件是否生效，Pod 内是否有 `VK_TASK_INDEX` 或 `VC_TASK_INDEX` |
+| `MASTER_ADDR` 解析失败 | Volcano `svc` 插件是否生效，`getent hosts "$JOB_NAME-worker-0.$JOB_NAME"` |
+| CUDA 不可用 | `runtimeClassName: nvidia`、CDI spec、vGPU 注入事件 |
+| `ImagePullBackOff` | 预拉 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime` 或用 `--image` 指定内网镜像 |
+| NCCL timeout | `NCCL_SOCKET_IFNAME`、跨节点 Pod 网络、NetworkPolicy、防火墙 |
 
-```bash
-cd "$CLEARML_REPO/examples/volcano_vgpu"
-python -c "
-from clearml import Task
-t = Task.create(
-    project_name='volcano-vgpu',
-    task_name='volcano-job-smoke-manual',
-    task_type=Task.TaskTypes.training,
-    script='train_volcano_job_smoke.py',
-    add_task_init_call=False,
-)
-t.set_tags(['scheme-3', 'smoke'])
-print('CLEARML_TASK_ID=', t.id)
-"
-```
-
-记下输出的 `CLEARML_TASK_ID`。
-
-### 3.B.2 创建 ConfigMap
+关键事件：
 
 ```bash
-kubectl create configmap clearml-vjob-smoke-example-script -n clearml \
-  --from-file=train_volcano_job_smoke.py="$CLEARML_REPO/examples/volcano_vgpu/train_volcano_job_smoke.py" \
-  --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl get configmap clearml-vjob-smoke-example-script -n clearml
-```
-
-### 3.B.3 编辑并 apply Job YAML
-
-```bash
-# 将 k8s/volcano_job_wholecard_gang.example.yaml 中
-#   value: "<clearml-task-id>"  替换为 3.B.1 的 id（不需要 WebUI 可留空 ""）
-
-kubectl apply -f k8s/volcano_job_wholecard_gang.example.yaml
-kubectl get job clearml-vjob-smoke-example -n clearml
-kubectl get pods -n clearml -l volcano.sh/job-name=clearml-vjob-smoke-example -o wide
-```
-
-### 3.B.4 验证与清理
-
-验证命令同 **步骤 3.A.3–3.A.5**（Job 名改为 `clearml-vjob-smoke-example`）。
-
-```bash
-kubectl delete job clearml-vjob-smoke-example -n clearml
-kubectl delete configmap clearml-vjob-smoke-example-script -n clearml
+kubectl describe pod "$POD" -n clearml
+kubectl get events -n clearml --sort-by=.lastTimestamp | tail -80
+kubectl logs -n clearml "$POD" --tail=120
 ```
 
 ---
 
-## 方案 3 故障排查命令
+## 7. 方案 3 生产化开发计划
 
-| 现象 | 命令 |
-|------|------|
-| Job 未创建 | `kubectl describe job "$JOB_NAME" -n clearml` |
-| 队列不存在 | `kubectl get queue multinode-full-gpu` |
-| gang 未齐射 | `kubectl get podgroup -n clearml \| grep "$JOB_NAME"` |
-| env 插件 | `kubectl exec <pod> -n clearml -- env \| grep VK_` |
-| MASTER_ADDR | `kubectl exec <pod> -n clearml -- env \| grep MASTER` |
+### M0：当前冒烟器收敛
+
+目标：让平台侧能稳定证明 Volcano Job + vGPU + CDI + NCCL 可用。
+
+已完成/应保持：
+
+- 默认 vGPU 模式
+- 默认 PyTorch CUDA 镜像
+- 默认不依赖 ClearML Task
+- CUDA 不可用时失败
+- ClearML logging 不可用时降级为 warning
+- Job 名、ConfigMap、资源、镜像可通过 CLI 控制
+
+验收：
+
+```bash
+python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
+python submit_volcano_job_wholecard.py --num-nodes 2 --apply
+kubectl logs -n clearml -l volcano.sh/job-name=<JOB_NAME> --all-containers --prefix
+```
+
+### M1：平台提交器
+
+目标：把 `submit_volcano_job_wholecard.py` 从 smoke 脚本升级为通用提交器。
+
+范围：
+
+- YAML values/config 文件输入，而不是只靠 CLI
+- 支持 image、command、args、env、resources、nodeSelector、tolerations
+- 支持 PVC、hostPath、Secret、ConfigMap、imagePullSecret
+- 支持 dry-run 输出到文件
+- 支持 cleanup / wait / logs / status 子命令
+- 失败时打印 Job、PodGroup、Pod events 的高信号摘要
+
+建议工作量：3-5 个工作日。
+
+### M2：ClearML 弱集成增强
+
+目标：保留 Volcano Job 的原生 gang，同时把实验元数据回写 ClearML。
+
+范围：
+
+- 用 Secret 注入 `CLEARML_API_ACCESS_KEY`、`CLEARML_API_SECRET_KEY`、`CLEARML_API_HOST`
+- rank0 自动创建/更新 ClearML Task
+- 写入 Job name、namespace、image、git commit、资源规格
+- 上传日志摘要和失败事件为 artifact
+- 支持 `--clearml-project`、`--clearml-task-name`、`--tags`
+
+建议工作量：1-2 周。
+
+### M3：训练框架适配
+
+目标：从 NCCL smoke 扩展到真实 PyTorch DDP 训练。
+
+范围：
+
+- 支持 `torchrun` 风格入口
+- 支持每 Pod 多 GPU：`--nproc-per-node`
+- 区分 `NNODES`、`NODE_RANK`、`RANK`、`LOCAL_RANK`
+- 统一 checkpoint 输出目录
+- 支持数据集挂载和断点续训
+- 支持训练失败后的诊断包收集
+
+建议工作量：1-2 周，取决于训练代码规范程度。
+
+### M4：生产运维
+
+目标：让平台能长期承载多租户训练。
+
+范围：
+
+- 镜像预拉或内网镜像仓库
+- Queue quota 与优先级策略
+- Job TTL / 历史清理
+- Prometheus 指标与告警
+- 节点 CDI/vGPU 健康巡检
+- 标准化故障手册
+
+建议工作量：2-3 周。
 
 ---
 
-# 三方案对比与推荐顺序
+## 8. 扩到 4 节点
 
-| | 方案 1 | 方案 2 | 方案 3 |
-|---|--------|--------|--------|
-| gang | ❌ | ✅ | ✅ |
-| 走 ClearML glue | ✅ | ✅ | ❌ |
-| ClearML Task 数 | N | N | 0~1 |
-| MASTER_ADDR | SDK 自动 | B / A / C 三选一 | svc DNS |
-| 提交命令 | `python train_launch_multinode_wholecard.py ...` | `python submit_multinode_podgroup.py ...` | `python submit_volcano_job_wholecard.py --apply` |
-
-**推荐冒烟顺序**：
+Volcano Job 不需要手工复制 PodGroup。直接提高 `--num-nodes`，并确认 Queue capability 足够：
 
 ```bash
-# 1) NCCL + ClearML 多 Task
+kubectl describe queue multinode-full-gpu | egrep -i 'volcano.sh/vgpu|cpu|memory'
+
+python submit_volcano_job_wholecard.py \
+  --num-nodes 4 \
+  --apply \
+  --vgpu-number 1 \
+  --vgpu-memory 24 \
+  --vgpu-cores 100
+```
+
+4 节点期望：
+
+```text
+allreduce sum = 10.0
+rank=0/1/2/3 均 DONE ok=True
+```
+
+如果 Queue capability 只有 2 张卡，需要先扩大 `volcano_queue_multinode_vgpu.example.yaml` 中的：
+
+```yaml
+capability:
+  volcano.sh/vgpu-number: "4"
+  volcano.sh/vgpu-memory: "96"
+```
+
+然后重新 apply。
+
+---
+
+## 9. 推荐执行顺序
+
+```bash
+# 1. 平台确认
+kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+kubectl describe queue multinode-full-gpu
+
+# 2. ClearML 原生多机冒烟
 python train_launch_multinode_wholecard.py --num-nodes 2 --queue multinode-full-gpu
 
-# 2) gang + 最简 MASTER_ADDR
+# 3. Volcano Job gang 冒烟
+python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
 python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 
-# 3) gang + glue 全 Task
-python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode task-poll
+# 4. 通过后再进入 M1/M2/M3 生产化
 ```
 
----
+最终判断标准：
 
-# 附录：扩到 4 节点
-
-1. 复制 `k8s/podgroup_clearml_gang_full_2.example.yaml` → `clearml-gang-full-4.yaml`，改 `minMember: 4`、`minResources.nvidia.com/gpu: "4"`
-2. values 注解改为 `clearml-gang-full-4`
-3. 提交时 `--num-nodes 4`
-4. Volcano Job：`submit_volcano_job_wholecard.py --num-nodes 4 --apply`
-
-```bash
-kubectl apply -f k8s/podgroup_clearml_gang_full_4.yaml   # 需自行复制修改
-python submit_multinode_podgroup.py --num-nodes 4 --podgroup clearml-gang-full-4
-python submit_volcano_job_wholecard.py --num-nodes 4 --apply
+```text
+[ ] 方案 1 能跑通 allreduce_sum=3.0
+[ ] 方案 3 两个 Pod gang 齐射
+[ ] 方案 3 Pod 内 torch.cuda.is_available=True
+[ ] 方案 3 allreduce_sum=3.0
+[ ] 无 unresolvable CDI devices
+[ ] 无 PodGroup overused nvidia.com/gpu
 ```

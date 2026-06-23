@@ -3,18 +3,18 @@
 # 推荐用 submit_volcano_job_wholecard.py 自动生成 Job 名 / ConfigMap / ClearML Task。
 # 本文件供手工 kubectl apply 或 CI 参考。
 #
-# ⚠️ 本模板用整卡 nvidia.com/gpu；HAMi/vGPU 集群（nvidia.com/gpu=0）请把下方 resources 的
-#    nvidia.com/gpu 换成 volcano.sh/vgpu-number/-memory/-cores（或直接用脚本 --gpu-mode vgpu）。
+# 本模板默认用于 HAMi/vGPU 集群：每 Pod 申请 1 份 volcano.sh/vgpu-*。
+# 原生 nvidia.com/gpu 集群请把 resources 改成 nvidia.com/gpu: "1"，或直接用脚本 --gpu-mode nvidia。
 #
 # 手工步骤:
-#   1. 替换 <JOB_NAME>、<CLEARML_TASK_ID>、<CONFIGMAP_NAME>
+#   1. 按需替换 Job 名、ConfigMap 名；若要写 ClearML scalar，再填写 CLEARML_TASK_ID
 #   2. kubectl create configmap <CONFIGMAP_NAME> -n clearml \
 #        --from-file=train_volcano_job_smoke.py=../train_volcano_job_smoke.py
 #   3. kubectl apply -f volcano_job_wholecard_gang.example.yaml
 #
 # MASTER_ADDR = <JOB_NAME>-worker-0.<JOB_NAME> （Volcano svc 插件 DNS：hostname.subdomain）
 #   注意：裸 <JOB_NAME>-worker-0 解析不到，subdomain=<JOB_NAME> 必须带上
-# NODE_RANK   = VK_TASK_INDEX       （Volcano env 插件，train_volcano_job_smoke.py 读取）
+# NODE_RANK   = VK_TASK_INDEX 或 VC_TASK_INDEX（Volcano env 插件，train_volcano_job_smoke.py 读取）
 ---
 apiVersion: batch.volcano.sh/v1alpha1
 kind: Job
@@ -50,13 +50,11 @@ spec:
                 name: clearml-vjob-smoke-example-script
           containers:
             - name: train
-              image: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+              image: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
               command: ["/bin/bash", "-lc"]
               args:
                 - |
                   set -e
-                  pip install -q clearml==2.1.8 torch==2.5.1 \
-                    --extra-index-url https://download.pytorch.org/whl/cu124
                   python /app/train_volcano_job_smoke.py
               env:
                 - name: NNODES
@@ -66,20 +64,26 @@ spec:
                 - name: MASTER_PORT
                   value: "29500"
                 - name: CLEARML_TASK_ID
-                  value: "<clearml-task-id>"
+                  value: ""
                 - name: NCCL_DEBUG
                   value: "INFO"
                 - name: NCCL_IB_DISABLE
                   value: "1"
                 - name: NCCL_SOCKET_IFNAME
                   value: "eth0"
+                - name: REQUIRE_CUDA
+                  value: "1"
               resources:
                 limits:
-                  nvidia.com/gpu: "1"
+                  volcano.sh/vgpu-number: "1"
+                  volcano.sh/vgpu-memory: "24"
+                  volcano.sh/vgpu-cores: "100"
                 requests:
                   cpu: "8"
                   memory: 32Gi
-                  nvidia.com/gpu: "1"
+                  volcano.sh/vgpu-number: "1"
+                  volcano.sh/vgpu-memory: "24"
+                  volcano.sh/vgpu-cores: "100"
               volumeMounts:
                 - name: smoke-script
                   mountPath: /app

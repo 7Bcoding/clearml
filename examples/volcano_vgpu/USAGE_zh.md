@@ -490,18 +490,17 @@ if int(os.environ.get("RANK", "0")) == 0:
 > ```
 > - `nvidia.com/gpu` ≥ 1 → 用 `*-full-gpu*` values/queue，申请 `nvidia.com/gpu`。
 > - `nvidia.com/gpu=0`、只有 `vgpu`（**HAMi/vGPU-only 集群**）→ 用 `*-vgpu*` values/queue；`vgpuHook` 开，脚本 `connect(VGPU)` 自定义规格（`cores:100`+整卡显存=整卡，更小=切片）。`train_launch_multinode_wholecard.py` 已内置 `--vgpu-number/--vgpu-memory/--vgpu-cores`。
-> 详见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md) §0.4。
+> 详见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md) 的平台前置检查与方案 3 可行性检查。
 
 | 需求 | 做法 | 入口 |
 |------|------|------|
 | 跨节点 DDP（脚本最简，无 gang） | `Task.launch_multi_node()` | `train_launch_multinode_wholecard.py` |
-| **PodGroup gang** + ClearML glue | PodGroup + N Task 齐入队 | `submit_multinode_podgroup.py` |
 | **Volcano Job gang**（原生 MASTER_ADDR） | `kubectl` / submit 脚本 | `submit_volcano_job_wholecard.py` |
 
-整卡队列 **`multinode-full-gpu`**。资源类型按上方自检：原生集群 `vgpuHook: false` + `nvidia.com/gpu`（方案 1/2 不 connect VGPU）；HAMi 集群 `vgpuHook: true`，脚本 `connect(VGPU)` 自定义规格（方案 1 已内置）。
+整卡队列 **`multinode-full-gpu`**。当前 HAMi/vGPU 路线使用 `volcano.sh/vgpu-*`；方案 1 通过 `connect(VGPU)` + Agent `vgpuHook` 注入，方案 3 由 Volcano Job 直接渲染 `volcano.sh/vgpu-*`。
 
-**逐步命令（含 kubectl / helm / 验证）见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md)**：第 0 章环境检查 → 第 1 章平台准备 → 方案 1/2/3 分章操作。  
-**方案 3b（改 Agent 生成 Volcano Job，算法只 `python train.py`）** → [`PLATFORM_scheme3b_volcano_job_agent_zh.md`](PLATFORM_scheme3b_volcano_job_agent_zh.md)。
+**逐步命令（含 kubectl / helm / 验证）见 [`MULTINODE_schemes_zh.md`](MULTINODE_schemes_zh.md)**：平台检查 → 方案 1 冒烟 → 方案 3 Volcano Job gang。
+**后续生产化（改 Agent/平台提交器生成 Volcano Job，算法只 `python train.py`）** → [`PLATFORM_scheme3b_volcano_job_agent_zh.md`](PLATFORM_scheme3b_volcano_job_agent_zh.md)。
 
 ---
 
@@ -549,16 +548,36 @@ python train_ddp_cnn_volcano_vgpu.py
 
 # 整卡多机（队列 multinode-full-gpu；完整步骤见 MULTINODE_schemes_zh.md）
 python train_launch_multinode_wholecard.py --num-nodes 2 --queue multinode-full-gpu
-python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode task-poll
-python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode fixed --master-addr <节点IP>
-python submit_multinode_podgroup.py --num-nodes 2 --master-addr-mode service \
-  --master-addr clearml-multinode-master.clearml.svc.cluster.local
+python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
 python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 ```
 
 - **本地调试**：注释掉 `execute_remotely(...)` 那一行，即可在本机直接跑（需本机有 torch）。
 - **WebUI 复跑**：实验 → **Clone** → 改 CONFIGURATION（**Args** / **Training** / **General** / **VGPU**）→ **Enqueue**，不改代码再跑一次。
+- **WebUI 表单提交（Pipeline）**：见 §11.1（`submit_pipeline_*.py`，+ NEW RUN 弹窗填参）。
 - **对比实验**：同一脚本多次 Enqueue，或 Clone 后只改一个超参，用 `report_single_value` 在列表页排序对比。
+
+### 11.1 WebUI 表单提交（Pipeline + NEW RUN）
+
+平台一次性注册后，算法工程师在 **Pipelines** 页用表单启动，无需 Clone 模板 Task。
+
+| 用途 | 平台注册（一次性） | WebUI 入口 |
+|------|-------------------|------------|
+| 单机 vGPU | `python submit_pipeline_single.py` | Pipelines → **Submit single-gpu training** → **+ NEW RUN** |
+| 多机 vGPU | `python submit_pipeline_multinode.py` | Pipelines → **Submit multinode-vgpu training** → **+ NEW RUN** |
+
+**前置**
+
+1. 模板 Task 至少存在一次：`train-single-gpu` / `multinode-launch-wholecard`（建议 **Publish**）。
+2. `services` 队列有 Agent 跑 pipeline controller；若无，注册时用 `--local`。
+3. 训练队列：`volcano-queue`（单机）/ `multinode-full-gpu`（多机）。
+
+**表单字段**（由 `add_parameter` 定义，覆盖克隆 Task 的 CONFIGURATION）
+
+- 单机：epochs、lr、batch_size、hidden、vgpu_memory、vgpu_cores、queue
+- 多机：num_nodes、master_port、vgpu_*、queue
+
+详见 [`ALGO_COMPARE_clearml_vs_kubeflow_zh.md`](ALGO_COMPARE_clearml_vs_kubeflow_zh.md) §3 与 `submit_pipeline_single.py` / `submit_pipeline_multinode.py` 顶部注释。
 
 ---
 
@@ -604,17 +623,16 @@ python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 | `train_ddp_cnn_volcano_vgpu.py` | 长跑 DDP（CNN，默认 ≥5 分钟，多指标 + artifact） |
 | `train_multinode_ddp_template.py` | **多机 DDP 训练模板**（torchrun 入口，平台支持多 Pod Job 后用） |
 | `train_launch_multinode_wholecard.py` | **方案 1**：整卡多机 `launch_multi_node`（无 gang） |
-| `submit_multinode_podgroup.py` | **方案 2**：本地 N Task 齐入队（PodGroup gang） |
-| `train_multinode_podgroup.py` | **方案 2**：Pod 内训练（三种 MASTER_ADDR 模式） |
-| `MULTINODE_schemes_zh.md` | **整卡多机**三方案逐步命令手册 |
-| `k8s/volcano_queue_multinode_full_gpu.example.yaml` | Volcano Queue CR |
-| `k8s/values-multinode-full-gpu*.yaml` | Helm 整卡队列 + gang / hostNetwork |
-| `k8s/podgroup_clearml_gang_full_2.example.yaml` | PodGroup CR（方案 2） |
-| `k8s/service_multinode_master.example.yaml` | MASTER_ADDR 补法 C（Service DNS） |
+| `submit_pipeline_single.py` | **WebUI 表单**：单机 vGPU Pipeline（+ NEW RUN） |
+| `submit_pipeline_multinode.py` | **WebUI 表单**：多机 vGPU Pipeline（+ NEW RUN） |
+| `MULTINODE_schemes_zh.md` | **整卡多机**：方案 1 冒烟 + 方案 3 Volcano Job 推荐路线 |
+| `ALGO_COMPARE_clearml_vs_kubeflow_zh.md` | **ClearML vs Kubeflow** 算法工程师并排示例（单机/多机） |
+| `k8s/volcano_queue_multinode_vgpu.example.yaml` | HAMi/vGPU Volcano Queue CR |
+| `k8s/values-multinode-vgpu.standalone.example.yaml` | HAMi/vGPU 多机 ClearML Agent values |
 | `submit_volcano_job_wholecard.py` | **方案 3**：Volcano Job gang 提交 |
 | `train_volcano_job_smoke.py` | **方案 3**：Job Pod 内 NCCL 冒烟 |
-| `k8s/volcano_job_wholecard_gang.example.yaml` | **方案 3a**：Volcano Job 模板 |
-| `PLATFORM_scheme3b_volcano_job_agent_zh.md` | **方案 3b**：改 Agent 生成 Volcano Job（平台排期） |
+| `k8s/volcano_job_wholecard_gang.example.yaml` | **方案 3**：Volcano Job 静态模板 |
+| `PLATFORM_scheme3b_volcano_job_agent_zh.md` | Volcano Job 生产化平台排期 |
 | `config.example.yaml` | `connect_configuration` 示例配置 |
 | `requirements-remote.txt` | Pod 内依赖清单 |
 | `smoke_test_vgpu.py` / `test_vgpu_per_task.py` | 平台验证脚本（仍用 `vgpu.py`，非算法工程师必读） |
@@ -634,5 +652,5 @@ python submit_volcano_job_wholecard.py --num-nodes 2 --apply
 单机多卡 DDP               → train_ddp_*.py，vgpu_number = 该机卡数
 多机 DDP（无 gang）         → train_launch_multinode_wholecard.py
 多机 DDP 真实训练（torchrun）→ train_multinode_ddp_template.py（平台支持多 Pod Job 后）
-多机 + Volcano gang         → submit_multinode_podgroup.py + PodGroup（见 MULTINODE_schemes_zh.md）
+多机 + Volcano gang         → submit_volcano_job_wholecard.py（见 MULTINODE_schemes_zh.md）
 ```

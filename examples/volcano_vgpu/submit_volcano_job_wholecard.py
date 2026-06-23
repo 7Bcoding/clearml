@@ -19,22 +19,19 @@
   python submit_volcano_job_wholecard.py --num-nodes 2 --apply                       # HAMi 整卡(默认)
   python submit_volcano_job_wholecard.py --num-nodes 2 --apply --vgpu-cores 30 --vgpu-memory 4  # 切片
   python submit_volcano_job_wholecard.py --num-nodes 2 --apply --gpu-mode nvidia     # 原生整卡
-  python submit_volcano_job_wholecard.py --num-nodes 2 --apply --no-clearml-task
+  python submit_volcano_job_wholecard.py --num-nodes 2 --apply --with-clearml-task    # 可选 WebUI scalar
 """
 import argparse
 import os
 import subprocess
-import sys
 import textwrap
 import uuid
 
-from clearml import Task
-
 DEFAULT_QUEUE = "multinode-full-gpu"
 DEFAULT_NAMESPACE = "clearml"
+DEFAULT_IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SMOKE_SCRIPT = os.path.join(_HERE, "train_volcano_job_smoke.py")
-_TORCH_INDEX = "https://download.pytorch.org/whl/cu124"
 
 
 def _gpu_resource_lines(gpu_mode, vgpu_number, vgpu_memory, vgpu_cores, indent=18):
@@ -64,6 +61,7 @@ def _job_manifest(
     vgpu_number,
     vgpu_memory,
     vgpu_cores,
+    image,
 ):
     # Volcano svc 插件给 Pod 设 hostname=<job>-worker-0、subdomain=<job>。
     # 默认 k8s resolv.conf 的 search 域不含 subdomain，裸 <job>-worker-0 解析不到，
@@ -107,13 +105,11 @@ def _job_manifest(
                         name: {configmap_name}
                   containers:
                     - name: train
-                      image: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+                      image: {image}
                       command: ["/bin/bash", "-lc"]
                       args:
                         - |
                           set -e
-                          pip install -q clearml==2.1.8 torch==2.5.1 \\
-                            --extra-index-url {torch_index}
                           python /app/train_volcano_job_smoke.py
                       env:
                         - name: NNODES
@@ -130,6 +126,8 @@ def _job_manifest(
                           value: "1"
                         - name: NCCL_SOCKET_IFNAME
                           value: "eth0"
+                        - name: REQUIRE_CUDA
+                          value: "1"
                       resources:
                         limits:
                           {gpu_lines}
@@ -150,8 +148,8 @@ def _job_manifest(
         task_id=task_id,
         configmap_name=configmap_name,
         master_host=master_host,
-        torch_index=_TORCH_INDEX,
         gpu_lines=gpu_lines,
+        image=image,
     )
 
 
@@ -169,7 +167,9 @@ def main():
     p.add_argument("--project", default="volcano-vgpu")
     p.add_argument("--dry-run", action="store_true", help="只打印 YAML / kubectl 提示，不执行")
     p.add_argument("--apply", action="store_true", help="执行 kubectl apply")
-    p.add_argument("--no-clearml-task", action="store_true", help="不创建 ClearML Task（无 WebUI 指标）")
+    p.add_argument("--with-clearml-task", action="store_true", help="创建 ClearML Task，Pod 内若有凭证则写 WebUI scalar")
+    p.add_argument("--no-clearml-task", action="store_true", help="兼容旧命令；默认已不创建 ClearML Task")
+    p.add_argument("--image", default=DEFAULT_IMAGE, help="训练镜像，需内置 Python + torch CUDA")
     p.add_argument(
         "--gpu-mode",
         choices=("vgpu", "nvidia"),
@@ -191,7 +191,11 @@ def main():
     configmap_name = "%s-script" % job_name
 
     clearml_task_id = ""
-    if not args.no_clearml_task:
+    if args.with_clearml_task and args.no_clearml_task:
+        raise SystemExit("--with-clearml-task 与 --no-clearml-task 不能同时使用")
+    if args.with_clearml_task:
+        from clearml import Task
+
         t = Task.create(
             project_name=args.project,
             task_name="volcano-job-smoke-%s" % run_id,
@@ -215,6 +219,7 @@ def main():
         vgpu_number=args.vgpu_number,
         vgpu_memory=args.vgpu_memory,
         vgpu_cores=args.vgpu_cores,
+        image=args.image,
     )
 
     print("\n=== Volcano Job manifest (%s) ===" % job_name)
