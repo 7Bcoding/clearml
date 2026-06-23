@@ -283,6 +283,46 @@ kubectl -n clearml exec <pod> -- ip addr
 
 然后重新 `helm upgrade` 并重提任务。
 
+`Timed out after 601 seconds waiting for clients. 1/2 clients joined`：
+
+这表示 master 已经进入 `torch.distributed.init_process_group`，但 worker 没有在超时时间内加入。它通常不是 master 本身的问题，而是 worker Pod 没有跑到同一行代码。
+
+先查 worker 是否真的创建并运行：
+
+```bash
+kubectl get pods -n clearml -o wide --sort-by=.metadata.creationTimestamp
+kubectl get events -n clearml --sort-by=.lastTimestamp | tail -120
+```
+
+再查 worker 日志和 Pod 事件：
+
+```bash
+kubectl logs -n clearml <worker-pod-name> --tail=120
+kubectl describe pod -n clearml <worker-pod-name>
+```
+
+重点看：
+
+```text
+ImagePullBackOff / ContainerCreating 时间过长
+pip install torch/clearml 太慢
+Unschedulable / vGPU 资源不够
+failed to inject CDI devices
+CUDA is not available
+MASTER_ADDR 无法访问
+```
+
+如果只是 worker 启动慢，可以先增大脚本的 rendezvous 等待时间：
+
+```bash
+python train_launch_multinode_wholecard.py \
+  --num-nodes 2 \
+  --queue multinode-full-gpu \
+  --dist-timeout-sec 1800
+```
+
+如果 worker 长期 Pending 或 CrashLoop，增大 timeout 没意义，先修 worker Pod 事件。方案 1 没有 gang 语义，master 先启动是正常现象；需要严格齐射时使用方案 3 Volcano Job。
+
 ---
 
 ## 5. 方案 3：Volcano Job gang 推荐路线

@@ -19,6 +19,7 @@
 """
 import argparse
 import os
+from datetime import timedelta
 
 from clearml import Task
 
@@ -27,14 +28,29 @@ _REQS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-r
 Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
 
 
-def _run_smoke(task: Task, logger) -> None:
+def _run_smoke(task: Task, logger, dist_timeout_sec: int, require_cuda: bool) -> None:
     import torch
     import torch.distributed as dist
 
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
+    print(
+        "distributed env: MASTER_ADDR=%s MASTER_PORT=%s NODE_RANK=%s RANK=%s WORLD_SIZE=%s"
+        % (
+            os.environ.get("MASTER_ADDR"),
+            os.environ.get("MASTER_PORT"),
+            os.environ.get("NODE_RANK"),
+            os.environ.get("RANK"),
+            os.environ.get("WORLD_SIZE"),
+        )
+    )
+    if require_cuda and not torch.cuda.is_available():
+        raise RuntimeError("CUDA is not available; check runtimeClassName/CDI/vGPU injection")
     backend = "nccl" if torch.cuda.is_available() else "gloo"
-    dist.init_process_group(backend=backend)
+    if backend == "nccl":
+        torch.cuda.set_device(0)
+        print("CUDA device: %s" % torch.cuda.get_device_name(0))
+    dist.init_process_group(backend=backend, timeout=timedelta(seconds=dist_timeout_sec))
     device = torch.device("cuda", 0) if backend == "nccl" else torch.device("cpu")
 
     t = torch.ones(1, device=device) * (rank + 1)
@@ -62,6 +78,9 @@ def main():
     parser.add_argument("--master-port", type=int, default=29500)
     parser.add_argument("--wait", action="store_true", default=True, help="master 等待 worker Task 启动")
     parser.add_argument("--no-wait", action="store_false", dest="wait")
+    parser.add_argument("--dist-timeout-sec", type=int, default=1800, help="PyTorch rendezvous 等待时间")
+    parser.add_argument("--require-cuda", action="store_true", default=True, help="CUDA 不可用时直接失败")
+    parser.add_argument("--allow-cpu", action="store_false", dest="require_cuda", help="允许退回 CPU/gloo，仅调试用")
     # vGPU 段（HAMi 集群由 vgpuHook 注入；原生 nvidia.com/gpu 集群忽略，无害）
     parser.add_argument("--vgpu-number", type=int, default=1, help="每 Pod 卡数（本脚本 1 进程/Pod，建议保持 1）")
     parser.add_argument("--vgpu-memory", type=int, default=24, help="每卡显存 GiB（整卡填整卡显存，如 4090=24）")
@@ -95,6 +114,7 @@ def main():
         port=args.master_port,
         queue=args.queue,
         wait=args.wait,
+        devices=1,
     )
 
     logger = task.get_logger() if int(os.environ.get("RANK", "0")) == 0 else None
@@ -109,7 +129,7 @@ def main():
                 os.environ.get("WORLD_SIZE"),
             )
         )
-    _run_smoke(task, logger)
+    _run_smoke(task, logger, args.dist_timeout_sec, args.require_cuda)
 
 
 if __name__ == "__main__":
