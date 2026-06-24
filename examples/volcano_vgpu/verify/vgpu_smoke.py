@@ -10,38 +10,82 @@ Volcano vGPU 全链路冒烟测试 (调度 + 显存隔离 + 多卡 torch OOM + C
 
 仅验证平台、不测 torch 分配:
     python verify/vgpu_smoke.py --vgpu-number 2 --skip-allocation
+
+默认按 standalone script 提交，worker 不需要访问 GitHub。
+如确实要使用记录的 git repo，可加 --use-git。
 """
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 import time
+import warnings
 
 from clearml import Task
-
-from vgpu_helpers import (
-    add_remote_repo_args,
-    apply_standalone_preflight,
-    connect_vgpu,
-    expected_memory_mib,
-    GPU_MEMORY_FACTOR,
-    pin_remote_packages,
-    prepare_remote_repo,
-    register_remote_requirements,
-)
-
-register_remote_requirements(__file__)
 
 DEFAULT_QUEUE = "volcano-queue"
 DEFAULT_VGPU_NUMBER = 1
 DEFAULT_VGPU_MEMORY_GIB = 2
 DEFAULT_VGPU_CORES = 30
+VGPU_SECTION = "VGPU"
+GPU_MEMORY_FACTOR = 1024
 MEMORY_TOLERANCE = 0.15
 DEFAULT_ALLOC_STEP_MB = 512
 MAX_ALLOC_STEPS = 64
 # PyTorch 2.x + CUDA 12 on vGPU: non-tensor reserve is roughly fixed (~300–512 MiB), not proportional to quota.
 CUDA_FRAMEWORK_RESERVE_MIB = 512
+
+
+def _remote_requirements_path() -> str:
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(os.path.dirname(here), "train", "requirements-remote.txt"),
+        os.path.join(here, "requirements-remote.txt"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return candidates[0]
+
+
+_REQS = _remote_requirements_path()
+
+
+def connect_vgpu(
+    task: Task,
+    *,
+    vgpu_number: int = 1,
+    vgpu_memory: int,
+    vgpu_cores: int,
+    section: str = VGPU_SECTION,
+    memory_factor: int = GPU_MEMORY_FACTOR,
+) -> dict:
+    if vgpu_number < 1:
+        raise ValueError("vgpu_number must be >= 1")
+    if vgpu_memory < 1:
+        raise ValueError("vgpu_memory must be >= 1 (GiB)")
+    if not 0 < vgpu_cores <= 100:
+        raise ValueError("vgpu_cores must be in (0, 100]")
+    if memory_factor > 1 and vgpu_memory > 64:
+        warnings.warn(
+            "vgpu_memory=%s looks like legacy MiB; use GiB (e.g. 2 for 2GB)" % vgpu_memory,
+            stacklevel=2,
+        )
+    return task.connect(
+        {
+            "vgpu_number": int(vgpu_number),
+            "vgpu_memory": int(vgpu_memory),
+            "vgpu_cores": int(vgpu_cores),
+            "gpu_memory_factor": int(memory_factor),
+        },
+        name=section,
+    )
+
+
+def expected_memory_mib(vgpu_memory: int, memory_factor: int = GPU_MEMORY_FACTOR) -> int:
+    return int(vgpu_memory) * int(memory_factor)
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,7 +110,11 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_ALLOC_STEP_MB,
         help="torch allocation chunk size per step (MiB)",
     )
-    add_remote_repo_args(parser)
+    parser.add_argument(
+        "--use-git",
+        action="store_true",
+        help="use recorded git repository instead of standalone script (requires worker network access)",
+    )
     return parser.parse_args()
 
 
@@ -160,7 +208,10 @@ def main() -> None:
     expected_mib = expected_memory_mib(args.vgpu_memory, GPU_MEMORY_FACTOR)
     failures: list[str] = []
 
-    apply_standalone_preflight(args)
+    if not args.use_git:
+        Task.force_store_standalone_script(True)
+    if os.path.isfile(_REQS):
+        Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
 
     task = Task.init(
         project_name="volcano-vgpu",
@@ -176,8 +227,13 @@ def main() -> None:
         vgpu_cores=args.vgpu_cores,
     )
 
-    pin_remote_packages(task, __file__)
-    prepare_remote_repo(task, args)
+    if Task.running_locally():
+        # Keep the remote environment small and deterministic; cloned tasks can
+        # otherwise retain a huge auto-frozen local environment.
+        task.set_packages(_REQS)
+        if not args.use_git:
+            task.set_repo("", branch="")
+            print("remote repo: standalone script (no git clone)")
     task.flush(wait_for_uploads=True)
     task.execute_remotely(queue_name=args.queue, exit_process=True)
 

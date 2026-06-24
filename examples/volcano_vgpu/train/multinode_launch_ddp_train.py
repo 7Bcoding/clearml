@@ -20,6 +20,7 @@
 """
 import argparse
 import os
+import subprocess
 from datetime import timedelta
 
 from clearml import OutputModel, Task
@@ -30,6 +31,16 @@ Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
 # This example is self-contained; store the entry script in the Task so
 # offline workers do not need to git clone/fetch GitHub.
 Task.force_store_standalone_script(True)
+
+
+def _print_network_diagnostics() -> None:
+    for cmd in (["hostname", "-I"], ["ip", "-br", "addr"], ["ip", "route"]):
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        except FileNotFoundError:
+            continue
+        print("$ %s" % " ".join(cmd))
+        print((result.stdout or result.stderr or "").strip())
 
 
 def _run_training(args: argparse.Namespace, task: Task) -> None:
@@ -53,6 +64,16 @@ def _run_training(args: argparse.Namespace, task: Task) -> None:
             world_size,
         )
     )
+    print(
+        "nccl env: NCCL_DEBUG=%s NCCL_DEBUG_SUBSYS=%s NCCL_SOCKET_IFNAME=%s NCCL_IB_DISABLE=%s"
+        % (
+            os.environ.get("NCCL_DEBUG"),
+            os.environ.get("NCCL_DEBUG_SUBSYS"),
+            os.environ.get("NCCL_SOCKET_IFNAME"),
+            os.environ.get("NCCL_IB_DISABLE"),
+        )
+    )
+    _print_network_diagnostics()
 
     if args.require_cuda and not torch.cuda.is_available():
         raise RuntimeError("CUDA is not available; check runtimeClassName/CDI/vGPU injection")
@@ -185,6 +206,10 @@ def main() -> None:
     parser.add_argument("--dist-timeout-sec", type=int, default=1800, help="PyTorch rendezvous 等待时间")
     parser.add_argument("--require-cuda", action="store_true", default=True, help="CUDA 不可用时直接失败")
     parser.add_argument("--allow-cpu", action="store_false", dest="require_cuda", help="允许退回 CPU/gloo，仅调试用")
+    parser.add_argument("--nccl-socket-ifname", default="eth0", help="NCCL 使用的 Pod 网卡，常见为 eth0")
+    parser.add_argument("--nccl-debug", default="INFO")
+    parser.add_argument("--nccl-debug-subsys", default="INIT,NET")
+    parser.add_argument("--nccl-ib-disable", default="1", help="无 IB/RDMA 时保持 1")
 
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=128, help="per-rank batch size")
@@ -233,6 +258,11 @@ def main() -> None:
 
     if Task.running_locally():
         task.execute_remotely(queue_name=args.queue)
+
+    os.environ["NCCL_SOCKET_IFNAME"] = args.nccl_socket_ifname
+    os.environ["NCCL_DEBUG"] = args.nccl_debug
+    os.environ["NCCL_DEBUG_SUBSYS"] = args.nccl_debug_subsys
+    os.environ["NCCL_IB_DISABLE"] = args.nccl_ib_disable
 
     launch_conf = task.launch_multi_node(
         total_num_nodes=args.num_nodes,
