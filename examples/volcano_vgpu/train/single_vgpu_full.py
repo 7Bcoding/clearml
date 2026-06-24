@@ -22,6 +22,10 @@ Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
 
 task = Task.init(project_name="volcano-vgpu", task_name="train-single-gpu")
 task.set_tags(["single-gpu", "mlp", "example"])  # WebUI 筛选用
+if Task.running_locally():
+    # Keep the remote environment small and deterministic; cloned tasks can
+    # otherwise retain a huge auto-frozen local environment.
+    task.set_packages(_REQS)
 
 # ------------------------------------------------------------------
 # 超参定义 (三选一, 详见 USAGE_zh.md §4)

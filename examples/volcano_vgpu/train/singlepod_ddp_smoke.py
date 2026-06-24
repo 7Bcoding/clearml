@@ -113,6 +113,10 @@ def main():
 
     task = Task.init(project_name="volcano-vgpu", task_name="train-ddp")
     task.set_tags(["ddp", "mlp", "example"])
+    if Task.running_locally():
+        # Keep the remote environment small and deterministic; cloned tasks can
+        # otherwise retain a huge auto-frozen local environment.
+        task.set_packages(reqs)
 
     # ------------------------------------------------------------------
     # 超参定义 (三选一, 详见 USAGE_zh.md §4)
