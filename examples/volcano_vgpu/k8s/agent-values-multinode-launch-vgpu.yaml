@@ -72,6 +72,8 @@ agentk8sglue:
         value: "1"
       - name: NCCL_SOCKET_IFNAME
         value: "eth0"
+      - name: PIP_CACHE_DIR
+        value: /root/.cache/pip
 
     nodeSelector:
       gpu.present: "true"

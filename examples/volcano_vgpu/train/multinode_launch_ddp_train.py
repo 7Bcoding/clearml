@@ -201,6 +201,10 @@ def main() -> None:
     parser.add_argument("--vgpu-cores", type=int, default=100, help="算力百分比（整卡=100，切片<100）")
     task = Task.init(project_name="volcano-vgpu", task_name="multinode-launch-ddp-train")
     task.set_tags(["multinode", "launch-multi-node", "ddp", "train"])
+    if Task.running_locally():
+        # Keep the remote environment small and deterministic; cloned tasks can
+        # otherwise retain a huge auto-frozen local environment.
+        task.set_packages(_REQS)
 
     args = parser.parse_args()
 

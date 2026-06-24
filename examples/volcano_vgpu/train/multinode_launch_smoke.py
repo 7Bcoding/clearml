@@ -92,6 +92,10 @@ def main():
 
     task = Task.init(project_name="volcano-vgpu", task_name="multinode-launch-wholecard")
     task.set_tags(["multinode", "wholecard", "launch-multi-node", "smoke"])
+    if Task.running_locally():
+        # Keep the remote environment small and deterministic; cloned tasks can
+        # otherwise retain a huge auto-frozen local environment.
+        task.set_packages(_REQS)
 
     task.connect(
         {"total_num_nodes": args.num_nodes, "queue": args.queue, "master_port": args.master_port},
