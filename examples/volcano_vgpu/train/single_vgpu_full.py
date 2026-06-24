@@ -19,6 +19,9 @@ from clearml import OutputModel, Task
 
 _REQS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-remote.txt")
 Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
+# These examples are self-contained; store the entry script in the Task so
+# offline workers do not need to git clone/fetch GitHub.
+Task.force_store_standalone_script(True)
 
 task = Task.init(project_name="volcano-vgpu", task_name="train-single-gpu")
 task.set_tags(["single-gpu", "mlp", "example"])  # WebUI 筛选用

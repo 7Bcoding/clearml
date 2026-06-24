@@ -27,6 +27,9 @@ from clearml import OutputModel, Task
 DEFAULT_QUEUE = "multinode-full-gpu"
 _REQS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-remote.txt")
 Task.force_requirements_env_freeze(force=True, requirements_file=_REQS)
+# This example is self-contained; store the entry script in the Task so
+# offline workers do not need to git clone/fetch GitHub.
+Task.force_store_standalone_script(True)
 
 
 def _run_training(args: argparse.Namespace, task: Task) -> None:

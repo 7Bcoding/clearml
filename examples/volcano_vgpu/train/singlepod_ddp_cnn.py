@@ -153,6 +153,9 @@ def main():
     # 【平台相关 1/2】依赖文件 (官方 API, 必须在 Task.init 之前)
     reqs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "requirements-remote.txt")
     Task.force_requirements_env_freeze(force=True, requirements_file=reqs)
+    # This example is self-contained; store the entry script in the Task so
+    # offline workers do not need to git clone/fetch GitHub.
+    Task.force_store_standalone_script(True)
 
     task = Task.init(project_name="volcano-vgpu", task_name="train-ddp-cnn")
     task.set_tags(["ddp", "cnn", "long-run", "example"])
