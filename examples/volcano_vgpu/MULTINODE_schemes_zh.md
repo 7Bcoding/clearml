@@ -47,6 +47,7 @@ cd "$env:CLEARML_REPO\examples\volcano_vgpu"
 | 文件 | 用途 |
 |---|---|
 | `train/multinode_launch_smoke.py` | 方案 1：ClearML `launch_multi_node` 冒烟 |
+| `train/multinode_launch_ddp_train.py` | 方案 1：ClearML `launch_multi_node` 多机 DDP 训练 |
 | `submit/submit_volcano_job.py` | 方案 3：生成 ConfigMap + Volcano Job |
 | `train/volcano_job_nccl_smoke.py` | 方案 3：Job Pod 内 NCCL 冒烟入口 |
 | `train/volcano_job_ddp_train.py` | 方案 3：Volcano Job 多机 DDP 训练模板 |
@@ -253,7 +254,32 @@ smoke/allreduce_sum = 3.0
 allreduce_ok = 1
 ```
 
-### 4.4 方案 1 常见问题
+### 4.4 提交真实 DDP 训练任务
+
+方案 1 也可以跑真实训练，只是它不提供 gang 调度语义。先确认 4.3 的冒烟通过，再提交训练模板：
+
+```bash
+cd "$CLEARML_REPO/examples/volcano_vgpu"
+python train/multinode_launch_ddp_train.py \
+  --num-nodes 2 \
+  --queue multinode-full-gpu \
+  --epochs 5 \
+  --batch-size 128 \
+  --vgpu-number 1 \
+  --vgpu-memory 24 \
+  --vgpu-cores 100
+```
+
+预期在 ClearML WebUI 的 master Task 中看到：
+
+```text
+SCALARS -> train/loss
+SCALARS -> train/accuracy
+MODELS  -> launch-multinode-ddp
+ARTIFACTS -> checkpoint
+```
+
+### 4.5 方案 1 常见问题
 
 `unresolvable CDI devices management.nvidia.com/gpu=GPU-...`：
 

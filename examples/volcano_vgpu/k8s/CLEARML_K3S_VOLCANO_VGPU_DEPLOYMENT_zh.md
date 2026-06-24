@@ -57,6 +57,7 @@ D:\Python\clearml
 | `examples/volcano_vgpu/train/single_vgpu_minimal.py` | 单卡训练模板 |
 | `examples/volcano_vgpu/train/singlepod_ddp_smoke.py` | 单 Pod 多卡 DDP 示例 |
 | `examples/volcano_vgpu/train/multinode_launch_smoke.py` | ClearML `launch_multi_node` 双机/多机示例 |
+| `examples/volcano_vgpu/train/multinode_launch_ddp_train.py` | ClearML `launch_multi_node` 双机/多机 DDP 训练 |
 | `examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml` | HAMi/vGPU 多机 Agent values |
 | `examples/volcano_vgpu/k8s/queue-multinode-vgpu.yaml` | HAMi/vGPU 多机 Volcano Queue |
 | `examples/volcano_vgpu/deprecated/k8s/podgroup-clearml-gang-full-2-vgpu.yaml` | 历史 PodGroup 示例，当前不推荐 |
@@ -1008,6 +1009,18 @@ python train/multinode_launch_smoke.py \
   --vgpu-cores 100
 ```
 
+训练模板验证：
+
+```bash
+python train/multinode_launch_ddp_train.py \
+  --num-nodes 2 \
+  --queue multinode-full-gpu \
+  --epochs 5 \
+  --batch-size 128 \
+  --vgpu-memory 24 \
+  --vgpu-cores 100
+```
+
 检查：
 
 ```bash
@@ -1315,6 +1328,7 @@ legacy 模式若再次出现 `libcuda.so.1`，不要让算法脚本逐个补 env
 [ ] clearml-agent-multinode 监听 multinode-full-gpu
 [ ] train/single_vgpu_minimal.py 能跑通
 [ ] train/multinode_launch_smoke.py 双机 allreduce_sum=3.0
+[ ] train/multinode_launch_ddp_train.py 双机 train/loss 与 train/accuracy 正常上报
 ```
 
 ---

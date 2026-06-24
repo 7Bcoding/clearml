@@ -494,7 +494,8 @@ if int(os.environ.get("RANK", "0")) == 0:
 
 | 需求 | 做法 | 入口 |
 |------|------|------|
-| 跨节点 DDP（脚本最简，无 gang） | `Task.launch_multi_node()` | `train/multinode_launch_smoke.py` |
+| 跨节点 DDP 冒烟（脚本最简，无 gang） | `Task.launch_multi_node()` | `train/multinode_launch_smoke.py` |
+| 跨节点 DDP 训练（无 gang） | `Task.launch_multi_node()` + DDP | `train/multinode_launch_ddp_train.py` |
 | **Volcano Job gang**（原生 MASTER_ADDR） | `kubectl` / submit 脚本 | `submit/submit_volcano_job.py` |
 
 整卡队列 **`multinode-full-gpu`**。当前 HAMi/vGPU 路线使用 `volcano.sh/vgpu-*`；方案 1 通过 `connect(VGPU)` + Agent `vgpuHook` 注入，方案 3 由 Volcano Job 直接渲染 `volcano.sh/vgpu-*`。
@@ -548,6 +549,7 @@ python train/singlepod_ddp_cnn.py
 
 # 整卡多机（队列 multinode-full-gpu；完整步骤见 MULTINODE_schemes_zh.md）
 python train/multinode_launch_smoke.py --num-nodes 2 --queue multinode-full-gpu
+python train/multinode_launch_ddp_train.py --num-nodes 2 --queue multinode-full-gpu --epochs 5
 python submit/submit_volcano_job.py --num-nodes 2 --dry-run
 python submit/submit_volcano_job.py --num-nodes 2 --apply
 python submit/submit_volcano_job.py --num-nodes 2 --apply \
@@ -626,6 +628,7 @@ python submit/submit_volcano_job.py --num-nodes 2 --apply \
 | `train/singlepod_ddp_cnn.py` | 长跑 DDP（CNN，默认 ≥5 分钟，多指标 + artifact） |
 | `deprecated/future_torchrun/train_multinode_ddp_template.py` | 历史多机 DDP torchrun 模板草案 |
 | `train/multinode_launch_smoke.py` | **方案 1**：整卡多机 `launch_multi_node`（无 gang） |
+| `train/multinode_launch_ddp_train.py` | **方案 1**：整卡多机 `launch_multi_node` DDP 训练 |
 | `submit/register_pipeline_single.py` | **WebUI 表单**：单机 vGPU Pipeline（+ NEW RUN） |
 | `submit/register_pipeline_multinode_smoke.py` | **WebUI 表单**：多机 vGPU Pipeline（+ NEW RUN） |
 | `MULTINODE_schemes_zh.md` | **整卡多机**：方案 1 冒烟 + 方案 3 Volcano Job 推荐路线 |
@@ -654,7 +657,8 @@ python submit/submit_volcano_job.py --num-nodes 2 --apply \
 已有 Hydra 项目            → §4.4，不必改成 argparse
 要 GPU 监控曲线            → 任务跑 ≥5min，或 train/singlepod_ddp_cnn.py
 单机多卡 DDP               → train/singlepod_ddp_*.py，vgpu_number = 该机卡数
-多机 DDP（无 gang）         → train/multinode_launch_smoke.py
+多机 DDP 冒烟（无 gang）    → train/multinode_launch_smoke.py
+多机 DDP 训练（无 gang）    → train/multinode_launch_ddp_train.py
 多机 DDP 真实训练（torchrun）→ deprecated/future_torchrun/train_multinode_ddp_template.py（历史草案）
 多机 + Volcano gang 冒烟     → submit/submit_volcano_job.py（默认 smoke）
 多机 + Volcano gang 训练     → submit/submit_volcano_job.py --script volcano_job_ddp_train.py
