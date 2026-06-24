@@ -10,10 +10,67 @@
 
 见 MULTINODE_schemes_zh.md §方案 3
 """
+import argparse
 import os
+import subprocess
+from datetime import timedelta
 
 import torch
 import torch.distributed as dist
+
+
+def _apply_dist_env(args):
+    socket_ifname = args.nccl_socket_ifname or os.environ.get("NCCL_SOCKET_IFNAME") or "eth0"
+    nccl_debug = args.nccl_debug or os.environ.get("NCCL_DEBUG") or "INFO"
+    nccl_debug_subsys = args.nccl_debug_subsys or os.environ.get("NCCL_DEBUG_SUBSYS") or "INIT,NET"
+    nccl_ib_disable = args.nccl_ib_disable or os.environ.get("NCCL_IB_DISABLE") or "1"
+
+    os.environ["NCCL_SOCKET_IFNAME"] = socket_ifname
+    os.environ.setdefault("GLOO_SOCKET_IFNAME", socket_ifname)
+    os.environ["NCCL_DEBUG"] = nccl_debug
+    os.environ["NCCL_DEBUG_SUBSYS"] = nccl_debug_subsys
+    os.environ["NCCL_IB_DISABLE"] = nccl_ib_disable
+
+
+def _run_diag(label, cmd):
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
+    except FileNotFoundError:
+        print("%s: command not found: %s" % (label, cmd[0]))
+        return
+    except Exception as exc:
+        print("%s: %s" % (label, exc))
+        return
+
+    output = (result.stdout or result.stderr or "").strip()
+    if output:
+        print("%s:\n%s" % (label, output))
+    else:
+        print("%s: <empty> rc=%s" % (label, result.returncode))
+
+
+def _print_dist_diagnostics(rank, world_size, backend, master_addr, master_port):
+    keys = [
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "RANK",
+        "WORLD_SIZE",
+        "LOCAL_RANK",
+        "NCCL_DEBUG",
+        "NCCL_DEBUG_SUBSYS",
+        "NCCL_SOCKET_IFNAME",
+        "NCCL_IB_DISABLE",
+        "GLOO_SOCKET_IFNAME",
+    ]
+    print(
+        "distributed env: rank=%s world_size=%s backend=%s %s"
+        % (rank, world_size, backend, " ".join("%s=%s" % (k, os.environ.get(k)) for k in keys))
+    )
+    _run_diag("hostname", ["hostname"])
+    _run_diag("hostname -I", ["hostname", "-I"])
+    _run_diag("getent hosts MASTER_ADDR", ["getent", "hosts", master_addr])
+    _run_diag("ip -br addr", ["ip", "-br", "addr"])
+    _run_diag("ip route", ["ip", "route"])
 
 
 def _logger():
@@ -31,6 +88,17 @@ def _logger():
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Volcano Job NCCL all_reduce smoke")
+    parser.add_argument("--dist-timeout-sec", type=int, default=int(os.environ.get("DIST_TIMEOUT_SEC", "1800")))
+    parser.add_argument("--nccl-socket-ifname", default="", help="Pod network interface for NCCL, usually eth0")
+    parser.add_argument("--nccl-debug", default="", help="NCCL_DEBUG override")
+    parser.add_argument("--nccl-debug-subsys", default="", help="NCCL_DEBUG_SUBSYS override")
+    parser.add_argument("--nccl-ib-disable", default="", help="NCCL_IB_DISABLE override, default 1")
+    parser.add_argument("--allow-cpu", action="store_true", help="allow gloo CPU fallback")
+    args = parser.parse_args()
+
+    _apply_dist_env(args)
+
     nnodes = int(os.environ.get("NNODES", "2"))
     rank_text = (
         os.environ.get("VK_TASK_INDEX")
@@ -43,7 +111,10 @@ def main():
     node_rank = int(rank_text)
     master_addr = os.environ.get("MASTER_ADDR", "").strip()
     master_port = int(os.environ.get("MASTER_PORT", "29500"))
-    require_cuda = os.environ.get("REQUIRE_CUDA", "1").lower() not in ("0", "false", "no")
+    require_cuda = (
+        os.environ.get("REQUIRE_CUDA", "1").lower() not in ("0", "false", "no")
+        and not args.allow_cpu
+    )
 
     if not master_addr:
         raise RuntimeError("MASTER_ADDR empty; Volcano Job svc 插件或 env 未配置")
@@ -58,9 +129,19 @@ def main():
 
     backend = "nccl" if torch.cuda.is_available() else "gloo"
     if backend == "nccl":
+        cuda_count = torch.cuda.device_count()
+        if cuda_count != 1:
+            print("WARN: this smoke script is one process per Pod and uses cuda:0 only; visible GPUs=%s" % cuda_count)
         torch.cuda.set_device(0)
         print("CUDA device: %s" % torch.cuda.get_device_name(0))
-    dist.init_process_group(backend=backend, rank=node_rank, world_size=nnodes)
+    _print_dist_diagnostics(node_rank, nnodes, backend, master_addr, master_port)
+
+    dist.init_process_group(
+        backend=backend,
+        rank=node_rank,
+        world_size=nnodes,
+        timeout=timedelta(seconds=args.dist_timeout_sec),
+    )
     device = torch.device("cuda", 0) if backend == "nccl" else torch.device("cpu")
 
     t = torch.ones(1, device=device) * (node_rank + 1)
