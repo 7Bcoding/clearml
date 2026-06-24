@@ -10,7 +10,7 @@ ClearML + Volcano vGPU 单卡训练模板 (官方写法, 推荐起点)
 超参默认用 argparse (ClearML 自动捕获到 WebUI Args 段); 其他写法见脚本内注释与 USAGE_zh.md §4。
 ClearML 训练集成: 标签 / scalar 曲线 / artifact 上传 (见 USAGE_zh.md §5)。
 
-提交: python train_template.py
+提交: python train/single_vgpu_minimal.py
 本地调试: 注释 execute_remotely 一行
 WebUI 复跑: Clone -> CONFIGURATION (Args / VGPU) -> Enqueue
 """

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-方案 3：提交 Volcano Job 整卡多机 gang 冒烟
+方案 3：提交 Volcano Job 整卡多机 gang 任务
 
 流程:
   1. （可选）创建 ClearML Task，供 rank0 写日志
-  2. 创建 ConfigMap（挂载 train_volcano_job_smoke.py）
+  2. 创建 ConfigMap（挂载训练脚本，默认 train/volcano_job_nccl_smoke.py）
   3. kubectl apply Volcano Job
 
 前置见 MULTINODE_schemes_zh.md §方案 3
@@ -15,11 +15,13 @@
   --gpu-mode nvidia        原生整卡集群，渲染 nvidia.com/gpu
 
 用法:
-  python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
-  python submit_volcano_job_wholecard.py --num-nodes 2 --apply                       # HAMi 整卡(默认)
-  python submit_volcano_job_wholecard.py --num-nodes 2 --apply --vgpu-cores 30 --vgpu-memory 4  # 切片
-  python submit_volcano_job_wholecard.py --num-nodes 2 --apply --gpu-mode nvidia     # 原生整卡
-  python submit_volcano_job_wholecard.py --num-nodes 2 --apply --with-clearml-task    # 可选 WebUI scalar
+  python submit/submit_volcano_job.py --num-nodes 2 --dry-run
+  python submit/submit_volcano_job.py --num-nodes 2 --apply                       # HAMi 整卡(默认)
+  python submit/submit_volcano_job.py --num-nodes 2 --apply --vgpu-cores 30 --vgpu-memory 4  # 切片
+  python submit/submit_volcano_job.py --num-nodes 2 --apply --gpu-mode nvidia     # 原生整卡
+  python submit/submit_volcano_job.py --num-nodes 2 --apply --with-clearml-task    # 可选 WebUI scalar
+  python submit/submit_volcano_job.py --num-nodes 2 --apply \
+    --script volcano_job_ddp_train.py --script-args "--epochs 5 --batch-size 128"
 """
 import argparse
 import os
@@ -31,7 +33,25 @@ DEFAULT_QUEUE = "multinode-full-gpu"
 DEFAULT_NAMESPACE = "clearml"
 DEFAULT_IMAGE = "pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime"
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SMOKE_SCRIPT = os.path.join(_HERE, "train_volcano_job_smoke.py")
+_EXAMPLE_ROOT = os.path.dirname(_HERE)
+_TRAIN_DIR = os.path.join(_EXAMPLE_ROOT, "train")
+_SMOKE_SCRIPT = os.path.join(_TRAIN_DIR, "volcano_job_nccl_smoke.py")
+
+
+def _resolve_script(path: str) -> str:
+    candidates = [path]
+    if not os.path.isabs(path):
+        candidates = [
+            os.path.abspath(path),
+            os.path.join(_TRAIN_DIR, path),
+            os.path.join(_EXAMPLE_ROOT, path),
+            os.path.join(_HERE, path),
+        ]
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if os.path.isfile(candidate):
+            return candidate
+    raise SystemExit("script not found: %s" % path)
 
 
 def _gpu_resource_lines(gpu_mode, vgpu_number, vgpu_memory, vgpu_cores, indent=18):
@@ -62,6 +82,8 @@ def _job_manifest(
     vgpu_memory,
     vgpu_cores,
     image,
+    script_name,
+    script_args,
 ):
     # Volcano svc 插件给 Pod 设 hostname=<job>-worker-0、subdomain=<job>。
     # 默认 k8s resolv.conf 的 search 域不含 subdomain，裸 <job>-worker-0 解析不到，
@@ -110,7 +132,7 @@ def _job_manifest(
                       args:
                         - |
                           set -e
-                          python /app/train_volcano_job_smoke.py
+                          python /app/{script_name} {script_args}
                       env:
                         - name: NNODES
                           value: "{num_nodes}"
@@ -150,15 +172,17 @@ def _job_manifest(
         master_host=master_host,
         gpu_lines=gpu_lines,
         image=image,
+        script_name=script_name,
+        script_args=script_args,
     )
 
 
 def _kubectl_apply_yaml(yaml_text: str) -> None:
-    subprocess.check_call(["kubectl", "apply", "-f", "-"], input=yaml_text, text=True)
+    subprocess.run(["kubectl", "apply", "-f", "-"], input=yaml_text, text=True, check=True)
 
 
 def main():
-    p = argparse.ArgumentParser(description="Submit Volcano Job whole-card gang smoke (scheme 3)")
+    p = argparse.ArgumentParser(description="Submit Volcano Job whole-card gang task (scheme 3)")
     p.add_argument("--num-nodes", type=int, default=2)
     p.add_argument("--queue", default=DEFAULT_QUEUE)
     p.add_argument("--namespace", default=DEFAULT_NAMESPACE)
@@ -170,6 +194,8 @@ def main():
     p.add_argument("--with-clearml-task", action="store_true", help="创建 ClearML Task，Pod 内若有凭证则写 WebUI scalar")
     p.add_argument("--no-clearml-task", action="store_true", help="兼容旧命令；默认已不创建 ClearML Task")
     p.add_argument("--image", default=DEFAULT_IMAGE, help="训练镜像，需内置 Python + torch CUDA")
+    p.add_argument("--script", default=_SMOKE_SCRIPT, help="挂载并执行的训练脚本路径，默认 NCCL smoke")
+    p.add_argument("--script-args", default="", help="传给训练脚本的参数字符串")
     p.add_argument(
         "--gpu-mode",
         choices=("vgpu", "nvidia"),
@@ -189,6 +215,8 @@ def main():
     run_id = uuid.uuid4().hex[:8]
     job_name = args.job_name or ("clearml-vjob-%s" % run_id)
     configmap_name = "%s-script" % job_name
+    script_path = _resolve_script(args.script)
+    script_name = os.path.basename(script_path)
 
     clearml_task_id = ""
     if args.with_clearml_task and args.no_clearml_task:
@@ -198,12 +226,12 @@ def main():
 
         t = Task.create(
             project_name=args.project,
-            task_name="volcano-job-smoke-%s" % run_id,
+            task_name="volcano-job-%s-%s" % (os.path.splitext(script_name)[0], run_id),
             task_type=Task.TaskTypes.training,
-            script=_SMOKE_SCRIPT,
+            script=script_path,
             add_task_init_call=False,
         )
-        t.set_tags(["multinode", "wholecard", "volcano-job", "scheme-3", "smoke", "job-%s" % job_name])
+        t.set_tags(["multinode", "wholecard", "volcano-job", "scheme-3", "job-%s" % job_name])
         clearml_task_id = t.id
         print("ClearML Task (rank0 日志): %s" % clearml_task_id)
 
@@ -220,6 +248,8 @@ def main():
         vgpu_memory=args.vgpu_memory,
         vgpu_cores=args.vgpu_cores,
         image=args.image,
+        script_name=script_name,
+        script_args=args.script_args,
     )
 
     print("\n=== Volcano Job manifest (%s) ===" % job_name)
@@ -232,7 +262,7 @@ def main():
         configmap_name,
         "-n",
         args.namespace,
-        "--from-file=train_volcano_job_smoke.py=%s" % _SMOKE_SCRIPT,
+        "--from-file=%s=%s" % (script_name, script_path),
         "--dry-run=client",
         "-o",
         "yaml",

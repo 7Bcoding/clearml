@@ -4,9 +4,9 @@
 # 原因: 集群只有 volcano.sh/vgpu-*，没有 nvidia.com/gpu device plugin
 #
 # 部署:
-#   kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+#   kubectl apply -f k8s/queue-multinode-vgpu.yaml
 #   helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-#     -f ~/clearml/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml
+#     -f ~/clearml/examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml
 #
 # 4090 整卡等价约 24GiB；A100-80G 请改 vgpu_memory。factor=1024 时单位为 GiB。
 

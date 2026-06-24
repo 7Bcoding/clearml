@@ -54,13 +54,13 @@ D:\Python\clearml
 
 | 文件 | 作用 |
 |---|---|
-| `examples/volcano_vgpu/train_template.py` | 单卡训练模板 |
-| `examples/volcano_vgpu/train_ddp_volcano_vgpu.py` | 单 Pod 多卡 DDP 示例 |
-| `examples/volcano_vgpu/train_launch_multinode_wholecard.py` | ClearML `launch_multi_node` 双机/多机示例 |
-| `examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml` | HAMi/vGPU 多机 Agent values |
-| `examples/volcano_vgpu/k8s/volcano_queue_multinode_vgpu.example.yaml` | HAMi/vGPU 多机 Volcano Queue |
-| `examples/volcano_vgpu/k8s/podgroup_clearml_gang_full_2_vgpu.example.yaml` | vGPU 版 PodGroup 示例 |
-| `examples/volcano_vgpu/k8s/ENABLE_CDI_full_stack_zh.md` | 旧版 CDI 迁移笔记，本文已合并并修正为当前结论 |
+| `examples/volcano_vgpu/train/single_vgpu_minimal.py` | 单卡训练模板 |
+| `examples/volcano_vgpu/train/singlepod_ddp_smoke.py` | 单 Pod 多卡 DDP 示例 |
+| `examples/volcano_vgpu/train/multinode_launch_smoke.py` | ClearML `launch_multi_node` 双机/多机示例 |
+| `examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml` | HAMi/vGPU 多机 Agent values |
+| `examples/volcano_vgpu/k8s/queue-multinode-vgpu.yaml` | HAMi/vGPU 多机 Volcano Queue |
+| `examples/volcano_vgpu/deprecated/k8s/podgroup-clearml-gang-full-2-vgpu.yaml` | 历史 PodGroup 示例，当前不推荐 |
+| `examples/volcano_vgpu/deprecated/docs/ENABLE_CDI_full_stack_zh.md` | 旧版 CDI 迁移笔记，本文已合并并修正为当前结论 |
 
 ---
 
@@ -751,7 +751,7 @@ multinode-full-gpu
 ### 10.1 创建 Volcano Queue
 
 ```bash
-kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/volcano_queue_multinode_vgpu.example.yaml"
+kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/queue-multinode-vgpu.yaml"
 kubectl get queue multinode-full-gpu
 kubectl describe queue multinode-full-gpu
 ```
@@ -799,7 +799,7 @@ PY
 values：
 
 ```text
-D:\Python\clearml\examples\volcano_vgpu\k8s\values-multinode-vgpu.standalone.example.yaml
+D:\Python\clearml\examples\volcano_vgpu\k8s\agent-values-multinode-launch-vgpu.yaml
 ```
 
 关键配置：
@@ -845,7 +845,7 @@ agentk8sglue:
 cd "$HELM_REPO"
 
 helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml"
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml"
 ```
 
 验证：
@@ -866,7 +866,7 @@ $HELM_REPO/examples/volcano-vgpu/custom_values.yaml
 多机 values：
 
 ```text
-$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml
+$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml
 ```
 
 两套可以分别部署成两个 release：
@@ -917,7 +917,7 @@ resources:
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
 
-python train_launch_multinode_wholecard.py \
+python train/multinode_launch_smoke.py \
   --num-nodes 2 \
   --queue multinode-full-gpu \
   --vgpu-number 1 \
@@ -928,7 +928,7 @@ python train_launch_multinode_wholecard.py \
 切片双机示例：
 
 ```bash
-python train_launch_multinode_wholecard.py \
+python train/multinode_launch_smoke.py \
   --num-nodes 2 \
   --queue multinode-full-gpu \
   --vgpu-number 1 \
@@ -988,7 +988,7 @@ ldconfig 能看到 libcuda.so.1
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
-python train_template.py
+python train/single_vgpu_minimal.py
 ```
 
 检查：
@@ -1001,7 +1001,7 @@ kubectl -n clearml logs <task-pod-name> --tail=80
 ### 12.5 ClearML 多机任务
 
 ```bash
-python train_launch_multinode_wholecard.py \
+python train/multinode_launch_smoke.py \
   --num-nodes 2 \
   --queue multinode-full-gpu \
   --vgpu-memory 24 \
@@ -1024,15 +1024,14 @@ CONFIGURATION -> allreduce_ok = 1
 
 ---
 
-## 13. PodGroup / Volcano Job 可选方案
+## 13. 历史 PodGroup / Volcano Job 可选方案
 
-### 13.1 PodGroup gang
+### 13.1 PodGroup gang（历史方案，不推荐）
 
-如果需要强 gang，使用 vGPU 版 PodGroup：
+旧的 PodGroup 方案已归档到 `deprecated/k8s/`，当前不再作为主线部署路径。需要对照历史配置时只查看文件，不建议在当前主线中 apply：
 
 ```bash
-kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/podgroup_clearml_gang_full_2_vgpu.example.yaml"
-kubectl describe podgroup clearml-gang-full-2 -n clearml
+less "$CLEARML_REPO/examples/volcano_vgpu/deprecated/k8s/podgroup-clearml-gang-full-2-vgpu.yaml"
 ```
 
 注意：
@@ -1047,7 +1046,7 @@ kubectl describe podgroup clearml-gang-full-2 -n clearml
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
-python submit_volcano_job_wholecard.py --num-nodes 2 --apply
+python submit/submit_volcano_job.py --num-nodes 2 --apply
 ```
 
 在 HAMi/vGPU 集群里，脚本应使用 vGPU 模式渲染 `volcano.sh/vgpu-*`。如果手工改 YAML，不要保留 `nvidia.com/gpu`。
@@ -1144,14 +1143,12 @@ vGPU-only 集群没有 `nvidia.com/gpu`，但队列或 PodGroup 还在用它。
 
 ```bash
 kubectl describe queue multinode-full-gpu
-kubectl describe podgroup clearml-gang-full-2 -n clearml
 ```
 
 修复：
 
 ```bash
-kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/volcano_queue_multinode_vgpu.example.yaml"
-kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/podgroup_clearml_gang_full_2_vgpu.example.yaml"
+kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/queue-multinode-vgpu.yaml"
 ```
 
 ### 14.6 Agent CrashLoop: `unrecognized arguments: --create-queue`
@@ -1162,7 +1159,7 @@ kubectl apply -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/podgroup_clearml_gang_
 
 ```bash
 helm upgrade clearml-agent-multinode "$HELM_REPO/charts/clearml-agent" -n clearml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml" \
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml" \
   --set agentk8sglue.createQueueIfNotExists=false
 ```
 
@@ -1316,8 +1313,8 @@ legacy 模式若再次出现 `libcuda.so.1`，不要让算法脚本逐个补 env
 [ ] ClearML Server API/Web/Files 可访问
 [ ] clearml-agent 监听 volcano-queue
 [ ] clearml-agent-multinode 监听 multinode-full-gpu
-[ ] train_template.py 能跑通
-[ ] train_launch_multinode_wholecard.py 双机 allreduce_sum=3.0
+[ ] train/single_vgpu_minimal.py 能跑通
+[ ] train/multinode_launch_smoke.py 双机 allreduce_sum=3.0
 ```
 
 ---

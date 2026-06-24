@@ -89,7 +89,10 @@ def expected_memory_mib(vgpu_memory: int, memory_factor: int = GPU_MEMORY_FACTOR
 
 
 def remote_requirements_path(script_file: str) -> str:
-    return str(Path(script_file).resolve().with_name("requirements-remote.txt"))
+    local_path = Path(script_file).resolve().with_name("requirements-remote.txt")
+    if local_path.exists():
+        return str(local_path)
+    return str(Path(__file__).resolve().parents[1] / "train" / "requirements-remote.txt")
 
 
 def register_remote_requirements(script_file: str) -> str:

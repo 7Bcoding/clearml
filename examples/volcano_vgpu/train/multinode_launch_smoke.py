@@ -13,9 +13,9 @@
 前置与操作见 MULTINODE_schemes_zh.md §方案 1
 
 用法:
-  python train_launch_multinode_wholecard.py --num-nodes 2
-  python train_launch_multinode_wholecard.py --num-nodes 2 --vgpu-cores 100 --vgpu-memory 24  # 整卡
-  python train_launch_multinode_wholecard.py --num-nodes 2 --vgpu-cores 30 --vgpu-memory 4    # 切片
+  python train/multinode_launch_smoke.py --num-nodes 2
+  python train/multinode_launch_smoke.py --num-nodes 2 --vgpu-cores 100 --vgpu-memory 24  # 整卡
+  python train/multinode_launch_smoke.py --num-nodes 2 --vgpu-cores 30 --vgpu-memory 4    # 切片
 """
 import argparse
 import os

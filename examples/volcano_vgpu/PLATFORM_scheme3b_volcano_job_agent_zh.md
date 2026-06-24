@@ -9,12 +9,12 @@
 
 ## 1. 方案对比（为何要做 3b）
 
-| | 方案 1 | 方案 2 | 方案 3a | **方案 3b** |
-|---|--------|--------|---------|-------------|
-| 算法提交 | `python train.py` | `submit_*.py` 每次 | `submit_volcano_job --apply` | **`python train.py`** |
-| gang | ❌ | ✅ | ✅ | ✅ |
-| MASTER_ADDR | SDK | 自补 | svc 插件 | **svc 插件** |
-| 改 Agent | ❌ | ❌ | ❌ | **✅** |
+| | 方案 1 | 方案 3a | **方案 3b** |
+|---|--------|---------|-------------|
+| 算法提交 | `python train.py` | `submit_volcano_job --apply` | **`python train.py`** |
+| gang | ❌ | ✅ | ✅ |
+| MASTER_ADDR | SDK | svc 插件 | **svc 插件** |
+| 改 Agent | ❌ | ❌ | **✅** |
 
 ---
 
@@ -255,10 +255,10 @@ python train_multinode_volcano_job.py --nnodes 2
 
 | 资产 | 用途 |
 |------|------|
-| `submit_volcano_job_wholecard.py` | Job YAML / svc MASTER_ADDR |
-| `k8s/volcano_job_wholecard_gang.example.yaml` | 静态模板 |
+| `submit/submit_volcano_job.py` | Job YAML / svc MASTER_ADDR |
+| `k8s/job-template-volcano-vgpu.yaml` | 静态模板 |
 | `PLATFORM_scheme3b_volcano_job_agent_zh.md` | 本文 |
-| `MULTINODE_schemes_zh.md` | 方案 1/2/3a 操作手册 |
+| `MULTINODE_schemes_zh.md` | 方案 1/3a 操作手册 |
 | `clearml-helm-charts/.../bootstrap_k8s_vgpu_patch.py` | patch 范本 |
 
-3b 完成后：**方案 2 可废弃**；**方案 3a** 留作 Agent 未上线前的调试手段。
+3b 完成后：**方案 3a** 留作 Agent 未上线前的调试手段。

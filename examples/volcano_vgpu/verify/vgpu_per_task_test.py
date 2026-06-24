@@ -4,9 +4,9 @@
 
 前提: agentk8sglue.vgpuHook.enabled=true
 
-    python test_vgpu_per_task.py --memory 2 --cores 30
-    python test_vgpu_per_task.py --memory 6 --cores 50
-    python test_vgpu_per_task.py --vgpu-number 2 --memory 2 --cores 30
+    python verify/vgpu_per_task_test.py --memory 2 --cores 30
+    python verify/vgpu_per_task_test.py --memory 6 --cores 50
+    python verify/vgpu_per_task_test.py --vgpu-number 2 --memory 2 --cores 30
 
 Agent 无 SSH 密钥时用 --standalone (helm 单文件脚本) 或 HTTPS repo URL。
 """
@@ -19,7 +19,7 @@ from pathlib import Path
 
 from clearml import Task
 
-from vgpu import (
+from vgpu_helpers import (
     add_remote_repo_args,
     apply_standalone_preflight,
     connect_vgpu,

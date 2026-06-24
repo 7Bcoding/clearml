@@ -10,8 +10,8 @@ VGG 风格 CNN + 合成图像数据集 + 基于时长的训练循环, 在 2x2GB 
 DDP 用 mp.spawn 必须放在 main() (if __name__ == "__main__") 里; torch 在 worker 内导入。
 
 提交:
-    python train_ddp_cnn_volcano_vgpu.py
-    python train_ddp_cnn_volcano_vgpu.py --target-minutes 10 --batch-size 128 --width 64
+    python train/singlepod_ddp_cnn.py
+    python train/singlepod_ddp_cnn.py --target-minutes 10 --batch-size 128 --width 64
 显存预算 (每卡 2GB, 约 1.5GiB 可用): width=64 batch=128 image=32 安全; OOM 降 batch/width。
 """
 import argparse

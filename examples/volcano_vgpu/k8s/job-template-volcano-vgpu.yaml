@@ -1,6 +1,6 @@
 # 方案 3：整卡多机 Volcano Job gang 冒烟（静态模板）
 #
-# 推荐用 submit_volcano_job_wholecard.py 自动生成 Job 名 / ConfigMap / ClearML Task。
+# 推荐用 submit/submit_volcano_job.py 自动生成 Job 名 / ConfigMap / ClearML Task。
 # 本文件供手工 kubectl apply 或 CI 参考。
 #
 # 本模板默认用于 HAMi/vGPU 集群：每 Pod 申请 1 份 volcano.sh/vgpu-*。
@@ -9,12 +9,12 @@
 # 手工步骤:
 #   1. 按需替换 Job 名、ConfigMap 名；若要写 ClearML scalar，再填写 CLEARML_TASK_ID
 #   2. kubectl create configmap <CONFIGMAP_NAME> -n clearml \
-#        --from-file=train_volcano_job_smoke.py=../train_volcano_job_smoke.py
-#   3. kubectl apply -f volcano_job_wholecard_gang.example.yaml
+#        --from-file=volcano_job_nccl_smoke.py=../train/volcano_job_nccl_smoke.py
+#   3. kubectl apply -f k8s/job-template-volcano-vgpu.yaml
 #
 # MASTER_ADDR = <JOB_NAME>-worker-0.<JOB_NAME> （Volcano svc 插件 DNS：hostname.subdomain）
 #   注意：裸 <JOB_NAME>-worker-0 解析不到，subdomain=<JOB_NAME> 必须带上
-# NODE_RANK   = VK_TASK_INDEX 或 VC_TASK_INDEX（Volcano env 插件，train_volcano_job_smoke.py 读取）
+# NODE_RANK   = VK_TASK_INDEX 或 VC_TASK_INDEX（Volcano env 插件，volcano_job_nccl_smoke.py 读取）
 ---
 apiVersion: batch.volcano.sh/v1alpha1
 kind: Job
@@ -55,7 +55,7 @@ spec:
               args:
                 - |
                   set -e
-                  python /app/train_volcano_job_smoke.py
+                  python /app/volcano_job_nccl_smoke.py
               env:
                 - name: NNODES
                   value: "2"

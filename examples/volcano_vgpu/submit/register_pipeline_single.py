@@ -3,18 +3,18 @@
 """
 WebUI 表单提交 —— 单机 vGPU 训练（Pipeline + NEW RUN）
 
-将 train_volcano_vgpu.py 注册为 Pipeline 的一步；算法工程师在 WebUI 填表启动，无需改 YAML。
+将 train/single_vgpu_full.py 注册为 Pipeline 的一步；算法工程师在 WebUI 填表启动，无需改 YAML。
 
 前置（平台一次性）:
   1. 至少跑通一次模板 Task（或 Publish）:
-       python train_volcano_vgpu.py   # 本地 exit 于 execute_remotely 亦可
+       python train/single_vgpu_full.py   # 本地 exit 于 execute_remotely 亦可
      项目 volcano-vgpu / 任务名 train-single-gpu
   2. services 队列有 Agent（或本脚本加 --local）
 
 注册 Pipeline（平台工程师）:
-  python submit_pipeline_single.py
-  python submit_pipeline_single.py --local          # 无 services Agent 时在本机跑 controller
-  python submit_pipeline_single.py --services-queue services
+  python submit/register_pipeline_single.py
+  python submit/register_pipeline_single.py --local          # 无 services Agent 时在本机跑 controller
+  python submit/register_pipeline_single.py --services-queue services
 
 算法工程师日常使用:
   WebUI → Pipelines → 项目 volcano-vgpu → 「Submit single-gpu training」→ + NEW RUN
@@ -40,7 +40,7 @@ def _warn_if_base_task_missing() -> None:
     t = Task.get_task(project_name=BASE_PROJECT, task_name=BASE_TASK_NAME, allow_archived=False)
     if t is None:
         print(
-            "WARNING: 未找到模板 Task %s/%s。请先执行: python train_volcano_vgpu.py"
+            "WARNING: 未找到模板 Task %s/%s。请先执行: python train/single_vgpu_full.py"
             % (BASE_PROJECT, BASE_TASK_NAME),
             file=sys.stderr,
         )
@@ -57,7 +57,9 @@ def build_pipeline() -> PipelineController:
     pipe.add_parameter("epochs", 5, "训练 epoch 数", param_type="int")
     pipe.add_parameter("lr", 1e-3, "学习率", param_type="float")
     pipe.add_parameter("batch_size", 128, "batch size", param_type="int")
+    pipe.add_parameter("weight_decay", 1e-4, "AdamW weight decay", param_type="float")
     pipe.add_parameter("hidden", 256, "MLP hidden 维度", param_type="int")
+    pipe.add_parameter("seed", 42, "随机种子", param_type="int")
     pipe.add_parameter("vgpu_number", 1, "每 Pod vGPU 卡数", param_type="int")
     pipe.add_parameter("vgpu_memory", 4, "vGPU 显存 (GiB, factor=1024)", param_type="int")
     pipe.add_parameter("vgpu_cores", 30, "vGPU 算力 (%)", param_type="int")
@@ -74,7 +76,9 @@ def build_pipeline() -> PipelineController:
             "Args/--epochs": "${pipeline.epochs}",
             "Args/--lr": "${pipeline.lr}",
             "Args/--batch-size": "${pipeline.batch_size}",
+            "Args/--weight-decay": "${pipeline.weight_decay}",
             "Args/--hidden": "${pipeline.hidden}",
+            "Args/--seed": "${pipeline.seed}",
             "VGPU/vgpu_number": "${pipeline.vgpu_number}",
             "VGPU/vgpu_memory": "${pipeline.vgpu_memory}",
             "VGPU/vgpu_cores": "${pipeline.vgpu_cores}",

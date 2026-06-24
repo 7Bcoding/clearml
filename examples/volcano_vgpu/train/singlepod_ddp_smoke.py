@@ -10,8 +10,8 @@ ClearML + Volcano vGPU 多卡 DDP 训练 (MLP, 官方写法)
 (子进程会重新 import 本模块); torch 在 worker 内导入, 故本机提交无需 torch。
 
 提交:
-    python train_ddp_volcano_vgpu.py
-    python train_ddp_volcano_vgpu.py --epochs 10 --batch-size 64 --hidden 128
+    python train/singlepod_ddp_smoke.py
+    python train/singlepod_ddp_smoke.py --epochs 10 --batch-size 64 --hidden 128
 要点: --batch-size 是每卡 batch (全局=batch×vgpu_number); 仅 rank0 上报 ClearML。
 """
 import argparse

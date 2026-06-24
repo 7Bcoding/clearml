@@ -4,7 +4,7 @@
 #   nvidia.com/gpu: 0
 #   volcano.sh/vgpu-number / vgpu-memory: 有值
 #
-# kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+# kubectl apply -f k8s/queue-multinode-vgpu.yaml
 ---
 apiVersion: scheduling.volcano.sh/v1beta1
 kind: Queue

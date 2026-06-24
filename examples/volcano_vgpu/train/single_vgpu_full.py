@@ -3,13 +3,13 @@
 """
 ClearML + Volcano vGPU 单卡训练示例 (官方写法, 较完整)
 
-相比 train_template.py, 这里演示更多 ClearML 训练集成:
+相比 train/single_vgpu_minimal.py, 这里演示更多 ClearML 训练集成:
   OutputModel / artifact 上传 / 标签 / 最终指标 / (可选) InputModel 预训练权重
 超参默认 argparse; 其他写法见脚本内注释与 USAGE_zh.md §4。
 
 提交:
-    python train_volcano_vgpu.py
-    python train_volcano_vgpu.py --epochs 20 --lr 3e-4
+    python train/single_vgpu_full.py
+    python train/single_vgpu_full.py --epochs 20 --lr 3e-4
 WebUI 复跑: Clone -> 改 CONFIGURATION (Args / VGPU) -> Enqueue
 """
 import argparse

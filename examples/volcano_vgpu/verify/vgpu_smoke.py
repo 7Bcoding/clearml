@@ -4,12 +4,12 @@
 Volcano vGPU 全链路冒烟测试 (调度 + 显存隔离 + 多卡 torch OOM + ClearML 回传)
 
 本地提交:
-    python smoke_test_vgpu.py --vgpu-memory 2 --vgpu-cores 30
-    python smoke_test_vgpu.py --vgpu-number 2 --vgpu-memory 2 --vgpu-cores 30
-    python smoke_test_vgpu.py --vgpu-number 2 --vgpu-memory 4 --vgpu-cores 50
+    python verify/vgpu_smoke.py --vgpu-memory 2 --vgpu-cores 30
+    python verify/vgpu_smoke.py --vgpu-number 2 --vgpu-memory 2 --vgpu-cores 30
+    python verify/vgpu_smoke.py --vgpu-number 2 --vgpu-memory 4 --vgpu-cores 50
 
 仅验证平台、不测 torch 分配:
-    python smoke_test_vgpu.py --vgpu-number 2 --skip-allocation
+    python verify/vgpu_smoke.py --vgpu-number 2 --skip-allocation
 """
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ import time
 
 from clearml import Task
 
-from vgpu import (
+from vgpu_helpers import (
     add_remote_repo_args,
     apply_standalone_preflight,
     connect_vgpu,

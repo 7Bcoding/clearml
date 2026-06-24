@@ -46,12 +46,13 @@ cd "$env:CLEARML_REPO\examples\volcano_vgpu"
 
 | 文件 | 用途 |
 |---|---|
-| `train_launch_multinode_wholecard.py` | 方案 1：ClearML `launch_multi_node` 冒烟 |
-| `submit_volcano_job_wholecard.py` | 方案 3：生成 ConfigMap + Volcano Job |
-| `train_volcano_job_smoke.py` | 方案 3：Job Pod 内 NCCL 冒烟入口 |
-| `k8s/values-multinode-vgpu.standalone.example.yaml` | 方案 1：HAMi/vGPU ClearML Agent values |
-| `k8s/volcano_queue_multinode_vgpu.example.yaml` | HAMi/vGPU Volcano Queue |
-| `k8s/volcano_job_wholecard_gang.example.yaml` | 方案 3：静态 Volcano Job 模板 |
+| `train/multinode_launch_smoke.py` | 方案 1：ClearML `launch_multi_node` 冒烟 |
+| `submit/submit_volcano_job.py` | 方案 3：生成 ConfigMap + Volcano Job |
+| `train/volcano_job_nccl_smoke.py` | 方案 3：Job Pod 内 NCCL 冒烟入口 |
+| `train/volcano_job_ddp_train.py` | 方案 3：Volcano Job 多机 DDP 训练模板 |
+| `k8s/agent-values-multinode-launch-vgpu.yaml` | 方案 1：HAMi/vGPU ClearML Agent values |
+| `k8s/queue-multinode-vgpu.yaml` | HAMi/vGPU Volcano Queue |
+| `k8s/job-template-volcano-vgpu.yaml` | 方案 3：静态 Volcano Job 模板 |
 | `k8s/CLEARML_K3S_VOLCANO_VGPU_DEPLOYMENT_zh.md` | 当前完整部署指南 |
 
 仍保留在仓库里的 `full-gpu`、`podgroup`、`service` 示例只作为历史/对照材料；当前 HAMi/vGPU 路线不要照它们操作。
@@ -151,7 +152,7 @@ HAMi/vGPU 集群使用 vGPU 版队列：
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
-kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+kubectl apply -f k8s/queue-multinode-vgpu.yaml
 kubectl get queue multinode-full-gpu
 kubectl describe queue multinode-full-gpu
 ```
@@ -201,7 +202,7 @@ print([x.name for x in api.queues.get_all()])
 cd "$HELM_REPO"
 
 helm upgrade --install clearml-agent-multinode charts/clearml-agent -n clearml \
-  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/values-multinode-vgpu.standalone.example.yaml"
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml"
 
 kubectl rollout status deploy/clearml-agent-multinode -n clearml
 kubectl logs -n clearml deploy/clearml-agent-multinode --tail=80
@@ -229,7 +230,7 @@ agentk8sglue:
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
-python train_launch_multinode_wholecard.py \
+python train/multinode_launch_smoke.py \
   --num-nodes 2 \
   --queue multinode-full-gpu \
   --vgpu-number 1 \
@@ -274,7 +275,7 @@ kubectl exec -n clearml deploy/clearml-agent-multinode -- ip route
 kubectl -n clearml exec <pod> -- ip addr
 ```
 
-如实际网卡不是 `eth0`，修改 `values-multinode-vgpu.standalone.example.yaml` 中的：
+如实际网卡不是 `eth0`，修改 `agent-values-multinode-launch-vgpu.yaml` 中的：
 
 ```yaml
 - name: NCCL_SOCKET_IFNAME
@@ -315,7 +316,7 @@ MASTER_ADDR 无法访问
 如果只是 worker 启动慢，可以先增大脚本的 rendezvous 等待时间：
 
 ```bash
-python train_launch_multinode_wholecard.py \
+python train/multinode_launch_smoke.py \
   --num-nodes 2 \
   --queue multinode-full-gpu \
   --dist-timeout-sec 1800
@@ -330,9 +331,9 @@ python train_launch_multinode_wholecard.py \
 方案 3 是当前推荐的 gang 路线。它绕过 ClearML k8s-glue，直接创建 Volcano Job：
 
 ```text
-submit_volcano_job_wholecard.py
+submit/submit_volcano_job.py
   -> 创建可选 ClearML Task
-  -> 创建 ConfigMap，挂载 train_volcano_job_smoke.py
+  -> 创建 ConfigMap，挂载 train/volcano_job_nccl_smoke.py 或 train/volcano_job_ddp_train.py
   -> 创建 Volcano Job
   -> Volcano env/svc 插件注入 rank 与 DNS
   -> 每个 Pod 申请 volcano.sh/vgpu-*，runtimeClassName=nvidia
@@ -344,10 +345,11 @@ submit_volcano_job_wholecard.py
 
 已经满足的条件：
 
-- `submit_volcano_job_wholecard.py` 默认 `--gpu-mode vgpu`，渲染 `volcano.sh/vgpu-*`
+- `submit/submit_volcano_job.py` 默认 `--gpu-mode vgpu`，渲染 `volcano.sh/vgpu-*`
 - Job Pod 使用 `schedulerName: volcano`
 - Job Pod 使用 `runtimeClassName: nvidia`，匹配当前 runtime CDI 路线
-- `train_volcano_job_smoke.py` 严格要求 CUDA 可用，不再静默退回 CPU
+- `train/volcano_job_nccl_smoke.py` 严格要求 CUDA 可用，不再静默退回 CPU
+- `train/volcano_job_ddp_train.py` 已提供最小 DDP 训练闭环：DataLoader、DistributedSampler、DDP、loss/accuracy、rank0 checkpoint
 - ClearML scalar 上报是弱集成；没有凭证时不会影响 NCCL 冒烟
 - 默认镜像已改为 `pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime`，避免 `nvidia/cuda:runtime` 中缺 Python/pip/torch 的问题
 
@@ -364,12 +366,13 @@ submit_volcano_job_wholecard.py
 
 ### 5.2 方案 3 当前边界
 
-方案 3a 当前只解决：
+方案 3a 当前已经解决：
 
 - gang 齐射
 - 每 Pod 一进程
 - vGPU 整卡或切片资源申请
 - NCCL all-reduce 冒烟
+- 最小 DDP 训练模板
 - 可选 ClearML Task 指标
 
 它暂不解决：
@@ -386,7 +389,7 @@ submit_volcano_job_wholecard.py
 
 ```bash
 cd "$CLEARML_REPO/examples/volcano_vgpu"
-python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
+python submit/submit_volcano_job.py --num-nodes 2 --dry-run
 ```
 
 默认生成 HAMi/vGPU Job：
@@ -403,17 +406,29 @@ resources:
 ### 5.4 提交 gang 冒烟
 
 ```bash
-python submit_volcano_job_wholecard.py \
+python submit/submit_volcano_job.py \
   --num-nodes 2 \
   --apply
+```
+
+提交真实 DDP 训练模板：
+
+```bash
+python submit/submit_volcano_job.py \
+  --num-nodes 2 \
+  --apply \
+  --script volcano_job_ddp_train.py \
+  --script-args "--epochs 5 --batch-size 128 --lr 0.001"
 ```
 
 如果要测试切片：
 
 ```bash
-python submit_volcano_job_wholecard.py \
+python submit/submit_volcano_job.py \
   --num-nodes 2 \
   --apply \
+  --script volcano_job_ddp_train.py \
+  --script-args "--epochs 3 --batch-size 128" \
   --vgpu-memory 4 \
   --vgpu-cores 30
 ```
@@ -421,10 +436,12 @@ python submit_volcano_job_wholecard.py \
 如果要写 ClearML WebUI scalar：
 
 ```bash
-python submit_volcano_job_wholecard.py \
+python submit/submit_volcano_job.py \
   --num-nodes 2 \
   --apply \
-  --with-clearml-task
+  --with-clearml-task \
+  --script volcano_job_ddp_train.py \
+  --script-args "--epochs 5"
 ```
 
 注意：`--with-clearml-task` 只是创建 Task 并把 ID 注入 Job。Pod 内仍需要能访问 ClearML Server，且镜像内有 ClearML 包，或你自行扩展镜像/命令安装它。否则脚本只打印 warning，不影响 NCCL 冒烟。
@@ -516,14 +533,14 @@ kubectl logs -n clearml "$POD" --tail=120
 验收：
 
 ```bash
-python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
-python submit_volcano_job_wholecard.py --num-nodes 2 --apply
+python submit/submit_volcano_job.py --num-nodes 2 --dry-run
+python submit/submit_volcano_job.py --num-nodes 2 --apply
 kubectl logs -n clearml -l volcano.sh/job-name=<JOB_NAME> --all-containers --prefix
 ```
 
 ### M1：平台提交器
 
-目标：把 `submit_volcano_job_wholecard.py` 从 smoke 脚本升级为通用提交器。
+目标：把 `submit/submit_volcano_job.py` 从 smoke 脚本升级为通用提交器。
 
 范围：
 
@@ -552,10 +569,11 @@ kubectl logs -n clearml -l volcano.sh/job-name=<JOB_NAME> --all-containers --pre
 
 ### M3：训练框架适配
 
-目标：从 NCCL smoke 扩展到真实 PyTorch DDP 训练。
+目标：把当前最小 DDP 模板扩展到真实业务训练。
 
 范围：
 
+- 接入真实 Dataset / PVC / 对象存储数据
 - 支持 `torchrun` 风格入口
 - 支持每 Pod 多 GPU：`--nproc-per-node`
 - 区分 `NNODES`、`NODE_RANK`、`RANK`、`LOCAL_RANK`
@@ -589,7 +607,7 @@ Volcano Job 不需要手工复制 PodGroup。直接提高 `--num-nodes`，并确
 ```bash
 kubectl describe queue multinode-full-gpu | egrep -i 'volcano.sh/vgpu|cpu|memory'
 
-python submit_volcano_job_wholecard.py \
+python submit/submit_volcano_job.py \
   --num-nodes 4 \
   --apply \
   --vgpu-number 1 \
@@ -604,7 +622,7 @@ allreduce sum = 10.0
 rank=0/1/2/3 均 DONE ok=True
 ```
 
-如果 Queue capability 只有 2 张卡，需要先扩大 `volcano_queue_multinode_vgpu.example.yaml` 中的：
+如果 Queue capability 只有 2 张卡，需要先扩大 `queue-multinode-vgpu.yaml` 中的：
 
 ```yaml
 capability:
@@ -620,15 +638,15 @@ capability:
 
 ```bash
 # 1. 平台确认
-kubectl apply -f k8s/volcano_queue_multinode_vgpu.example.yaml
+kubectl apply -f k8s/queue-multinode-vgpu.yaml
 kubectl describe queue multinode-full-gpu
 
 # 2. ClearML 原生多机冒烟
-python train_launch_multinode_wholecard.py --num-nodes 2 --queue multinode-full-gpu
+python train/multinode_launch_smoke.py --num-nodes 2 --queue multinode-full-gpu
 
 # 3. Volcano Job gang 冒烟
-python submit_volcano_job_wholecard.py --num-nodes 2 --dry-run
-python submit_volcano_job_wholecard.py --num-nodes 2 --apply
+python submit/submit_volcano_job.py --num-nodes 2 --dry-run
+python submit/submit_volcano_job.py --num-nodes 2 --apply
 
 # 4. 通过后再进入 M1/M2/M3 生产化
 ```
