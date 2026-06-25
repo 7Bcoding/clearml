@@ -1,0 +1,92 @@
+# Single-node / single-pod vGPU queue values for HAMi/vGPU clusters.
+#
+# This file mirrors the custom_values.yaml example in the local Helm chart repo,
+# but keeps cache paths queue-scoped so production deployments can isolate
+# environments by queue/project/tenant.
+
+clearml:
+  existingAgentk8sglueSecret: "clearml-agent-creds"
+
+agentk8sglue:
+  image:
+    repository: "allegroai/clearml-agent-k8s-base"
+    tag: "1.24-21"
+
+  replicaCount: 1
+
+  apiServerUrlReference: "http://10.10.36.6:30008"
+  fileServerUrlReference: "http://10.10.36.6:30081"
+  webServerUrlReference: "http://10.10.36.6:30080"
+  clearmlcheckCertificate: false
+
+  queue: volcano-queue
+  createQueueIfNotExists: false
+  defaultContainerImage: nvidia/cuda:12.4.1-runtime-ubuntu22.04
+
+  vgpuHook:
+    enabled: true
+    section: VGPU
+    gpuMemoryFactor: 1024
+    mode: hami-core
+    containerName: ""
+
+  extraEnvs:
+    - name: "CLEARML_AGENT_NO_UPDATE"
+      value: "true"
+
+  basePodTemplate:
+    schedulerName: volcano
+    runtimeClassName: nvidia
+    hostPID: true
+
+    annotations:
+      volcano.sh/vgpu-mode: "hami-core"
+
+    resources:
+      limits:
+        volcano.sh/vgpu-number: 1
+        volcano.sh/vgpu-memory: 2
+        volcano.sh/vgpu-cores: 30
+      requests:
+        cpu: "4"
+        memory: 16Gi
+
+    env:
+      - name: PIP_CACHE_DIR
+        value: /root/.cache/pip
+      # Queue-scoped cache paths. venv cache accelerates environment setup but
+      # should not be treated as a tenant/user security boundary.
+      - name: CLEARML_AGENT_VENV_CACHE_PATH
+        value: /root/.clearml/venvs-cache
+      - name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+        value: "false"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+        value: '"/root/.cache/pip"'
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+        value: '"/root/.clearml/vcs-cache"'
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__MAX_ENTRIES
+        value: "20"
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__FREE_SPACE_THRESHOLD_GB
+        value: "10"
+
+    volumes:
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache/volcano-queue/clearml
+          type: DirectoryOrCreate
+      - name: pip-cache
+        hostPath:
+          path: /data/clearml-cache/volcano-queue/pip
+          type: DirectoryOrCreate
+    volumeMounts:
+      - name: clearml-cache
+        mountPath: /root/.clearml
+      - name: pip-cache
+        mountPath: /root/.cache/pip
+
+    tolerations: []
+    nodeSelector: {}

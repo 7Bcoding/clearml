@@ -74,6 +74,24 @@ agentk8sglue:
         value: "eth0"
       - name: PIP_CACHE_DIR
         value: /root/.cache/pip
+      # 生产建议：缓存目录按 queue / project / tenant 分开。
+      # venv cache 可以加速重复环境构建，但它不是用户隔离边界。
+      - name: CLEARML_AGENT_VENV_CACHE_PATH
+        value: /root/.clearml/venvs-cache
+      - name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+        value: "false"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+        value: '"/root/.cache/pip"'
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+        value: '"/root/.clearml/vcs-cache"'
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__MAX_ENTRIES
+        value: "20"
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__FREE_SPACE_THRESHOLD_GB
+        value: "10"
 
     nodeSelector:
       gpu.present: "true"
@@ -81,8 +99,14 @@ agentk8sglue:
     volumes:
       - name: clearml-cache
         hostPath:
-          path: /data/clearml-cache
+          path: /data/clearml-cache/multinode-full-gpu/clearml
+          type: DirectoryOrCreate
+      - name: pip-cache
+        hostPath:
+          path: /data/clearml-cache/multinode-full-gpu/pip
           type: DirectoryOrCreate
     volumeMounts:
       - name: clearml-cache
         mountPath: /root/.clearml
+      - name: pip-cache
+        mountPath: /root/.cache/pip

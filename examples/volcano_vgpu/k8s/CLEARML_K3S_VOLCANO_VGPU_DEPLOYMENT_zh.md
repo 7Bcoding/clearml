@@ -42,7 +42,7 @@ D:\Python\clearml-helm-charts
 | `charts/clearml-agent/values.yaml` | ClearML Agent values，已扩展 `runtimeClassName`、`hostPID`、`vgpuHook`、`basePodTemplate` |
 | `charts/clearml-agent/files/vgpu_template_module.py` | 从 Task 的 `CONFIGURATION/VGPU` 读取 `vgpu_number/vgpu_memory/vgpu_cores` |
 | `charts/clearml-agent/files/bootstrap_k8s_vgpu_patch.py` | patch k8s-glue，让开源 Agent 也能按任务注入 vGPU limits |
-| `examples/volcano-vgpu/custom_values.yaml` | 单机/单 Pod vGPU 队列 `volcano-queue` 的 Agent values |
+| `examples/volcano-vgpu/custom_values.yaml` | Helm chart 仓库内的单机/单 Pod vGPU Agent values 示例 |
 
 ### 1.2 ClearML SDK 示例仓库
 
@@ -58,6 +58,7 @@ D:\Python\clearml
 | `examples/volcano_vgpu/train/singlepod_ddp_smoke.py` | 单 Pod 多卡 DDP 示例 |
 | `examples/volcano_vgpu/train/multinode_launch_smoke.py` | ClearML `launch_multi_node` 双机/多机示例 |
 | `examples/volcano_vgpu/train/multinode_launch_ddp_train.py` | ClearML `launch_multi_node` 双机/多机 DDP 训练 |
+| `examples/volcano_vgpu/k8s/agent-values-single-vgpu.yaml` | 单机/单 Pod vGPU Agent values，按 `volcano-queue` 隔离 cache |
 | `examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml` | HAMi/vGPU 多机 Agent values |
 | `examples/volcano_vgpu/k8s/queue-multinode-vgpu.yaml` | HAMi/vGPU 多机 Volcano Queue |
 | `examples/volcano_vgpu/deprecated/k8s/podgroup-clearml-gang-full-2-vgpu.yaml` | 历史 PodGroup 示例，当前不推荐 |
@@ -667,11 +668,79 @@ kubectl -n clearml create secret generic clearml-agent-creds \
   --dry-run=client -o yaml | kubectl apply -f -
 ```
 
-本地 `custom_values.yaml` 与多机 values 都引用：
+Helm chart 示例 `custom_values.yaml`、本文档新增的单机 values、以及多机 values 都引用：
 
 ```yaml
 clearml:
   existingAgentk8sglueSecret: "clearml-agent-creds"
+```
+
+### 8.4 上线环境：Agent 环境隔离与缓存策略
+
+ClearML Agent 会按 Task 记录的代码、Python 版本和依赖重建运行环境。缓存能显著减少重复安装时间，但 **缓存不是用户隔离边界**。上线后要把“运行隔离”和“缓存复用”分开设计：
+
+```text
+运行隔离：Kubernetes Pod / namespace / queue / Agent / venv
+缓存复用：pip download cache / vcs cache / venv cache
+```
+
+推荐分层如下：
+
+| 场景 | 建议 |
+|---|---|
+| 内部可信团队 | 可以共享同一队列的 pip cache 和 venv cache；要求任务不要在运行中修改 site-packages |
+| 多项目组 | 每个项目组独立 ClearML queue + Agent release + cache 目录/PVC |
+| 多租户上线 | 每个租户独立 namespace、Agent、Secret、queue、cache PVC；只共享基础镜像或只读镜像仓库 |
+| 强安全隔离 | 不共享 venv cache；最多共享只读 wheelhouse 或 pip download cache |
+
+当前示例采用 **按队列隔离 cache 目录** 的折中方案：
+
+```text
+/data/clearml-cache/volcano-queue/clearml
+/data/clearml-cache/volcano-queue/pip
+/data/clearml-cache/multinode-full-gpu/clearml
+/data/clearml-cache/multinode-full-gpu/pip
+```
+
+这样 `volcano-queue` 和 `multinode-full-gpu` 不会共用同一个可写 venv cache。后续如果要按项目组或租户隔离，把 queue 名和路径替换成项目/租户名即可，例如：
+
+```text
+clearml-agent-team-a -> queue team-a-gpu -> /data/clearml-cache/team-a/...
+clearml-agent-team-b -> queue team-b-gpu -> /data/clearml-cache/team-b/...
+```
+
+Task Pod 内建议统一注入这些环境变量：
+
+```yaml
+- name: PIP_CACHE_DIR
+  value: /root/.cache/pip
+- name: CLEARML_AGENT_VENV_CACHE_PATH
+  value: /root/.clearml/venvs-cache
+- name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+  value: "false"
+- name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+  value: "true"
+- name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+  value: '"/root/.cache/pip"'
+- name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+  value: "true"
+- name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+  value: '"/root/.clearml/vcs-cache"'
+```
+
+说明：
+
+- `CLEARML_AGENT_VENV_CACHE_PATH` 启用 venv 缓存，但不同依赖签名仍会生成不同 cache entry。
+- `PIP_CACHE_DIR` / `agent.pip_download_cache` 只缓存下载包，不等于共用 Python 环境，风险比共享 venv cache 低。
+- `system_site_packages=false` 避免 Task venv 继承镜像或系统 Python 包，隔离性更好。
+- 不要让训练脚本在运行过程中 `pip install` / `pip uninstall` / 修改 `site-packages`。依赖应该写进 `requirements-remote.txt` 或 Task packages。
+- 如果用户能提交任意代码，不要跨租户共享可写 hostPath venv cache；改用每租户 PVC 或禁用 venv cache。
+
+本文档提供两份可直接使用的 values：
+
+```text
+$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-single-vgpu.yaml
+$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-multinode-launch-vgpu.yaml
 ```
 
 ---
@@ -687,7 +756,7 @@ volcano-queue
 values：
 
 ```text
-D:\Python\clearml-helm-charts\examples\volcano-vgpu\custom_values.yaml
+D:\Python\clearml\examples\volcano_vgpu\k8s\agent-values-single-vgpu.yaml
 ```
 
 关键配置：
@@ -712,6 +781,42 @@ agentk8sglue:
         volcano.sh/vgpu-number: 1
         volcano.sh/vgpu-memory: 2
         volcano.sh/vgpu-cores: 30
+      requests:
+        cpu: "4"
+        memory: 16Gi
+    env:
+      - name: PIP_CACHE_DIR
+        value: /root/.cache/pip
+      - name: CLEARML_AGENT_VENV_CACHE_PATH
+        value: /root/.clearml/venvs-cache
+      - name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+        value: "false"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+        value: '"/root/.cache/pip"'
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+        value: '"/root/.clearml/vcs-cache"'
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__MAX_ENTRIES
+        value: "20"
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__FREE_SPACE_THRESHOLD_GB
+        value: "10"
+    volumes:
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache/volcano-queue/clearml
+          type: DirectoryOrCreate
+      - name: pip-cache
+        hostPath:
+          path: /data/clearml-cache/volcano-queue/pip
+          type: DirectoryOrCreate
+    volumeMounts:
+      - name: clearml-cache
+        mountPath: /root/.clearml
+      - name: pip-cache
+        mountPath: /root/.cache/pip
 ```
 
 安装：
@@ -720,7 +825,7 @@ agentk8sglue:
 cd "$HELM_REPO"
 
 helm upgrade --install clearml-agent charts/clearml-agent -n clearml \
-  -f examples/volcano-vgpu/custom_values.yaml
+  -f "$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-single-vgpu.yaml"
 ```
 
 验证：
@@ -836,8 +941,40 @@ agentk8sglue:
         value: "1"
       - name: NCCL_SOCKET_IFNAME
         value: "eth0"
+      - name: PIP_CACHE_DIR
+        value: /root/.cache/pip
+      - name: CLEARML_AGENT_VENV_CACHE_PATH
+        value: /root/.clearml/venvs-cache
+      - name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+        value: "false"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+        value: '"/root/.cache/pip"'
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+        value: '"/root/.clearml/vcs-cache"'
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__MAX_ENTRIES
+        value: "20"
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__FREE_SPACE_THRESHOLD_GB
+        value: "10"
     nodeSelector:
       gpu.present: "true"
+    volumes:
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache/multinode-full-gpu/clearml
+          type: DirectoryOrCreate
+      - name: pip-cache
+        hostPath:
+          path: /data/clearml-cache/multinode-full-gpu/pip
+          type: DirectoryOrCreate
+    volumeMounts:
+      - name: clearml-cache
+        mountPath: /root/.clearml
+      - name: pip-cache
+        mountPath: /root/.cache/pip
 ```
 
 部署：
@@ -861,7 +998,7 @@ kubectl -n clearml logs deploy/clearml-agent-multinode --tail=120
 单机 values：
 
 ```text
-$HELM_REPO/examples/volcano-vgpu/custom_values.yaml
+$CLEARML_REPO/examples/volcano_vgpu/k8s/agent-values-single-vgpu.yaml
 ```
 
 多机 values：
@@ -1326,6 +1463,10 @@ legacy 模式若再次出现 `libcuda.so.1`，不要让算法脚本逐个补 env
 [ ] ClearML Server API/Web/Files 可访问
 [ ] clearml-agent 监听 volcano-queue
 [ ] clearml-agent-multinode 监听 multinode-full-gpu
+[ ] 单机/多机 Agent 使用不同 cache 路径或 PVC
+[ ] Task Pod 内 `CLEARML_AGENT_VENV_CACHE_PATH=/root/.clearml/venvs-cache`
+[ ] Task Pod 内 `PIP_CACHE_DIR=/root/.cache/pip`
+[ ] Task Pod 内未启用 `system_site_packages`
 [ ] train/single_vgpu_minimal.py 能跑通
 [ ] train/multinode_launch_smoke.py 双机 allreduce_sum=3.0
 [ ] train/multinode_launch_ddp_train.py 双机 train/loss 与 train/accuracy 正常上报
@@ -1339,5 +1480,8 @@ legacy 模式若再次出现 `libcuda.so.1`，不要让算法脚本逐个补 env
 - K3s advanced runtime 文档：<https://docs.k3s.io/advanced>
 - Volcano GPU virtualization 文档：<https://volcano.sh/en/docs/gpu_virtualization/>
 - volcano-vgpu-device-plugin：<https://github.com/Project-HAMi/volcano-vgpu-device-plugin>
+- ClearML Agent 文档：<https://clear.ml/docs/latest/docs/clearml_agent/>
+- ClearML Agent 环境变量：<https://clear.ml/docs/latest/docs/clearml_agent/clearml_agent_env_var/>
+- ClearML 配置文件参考：<https://clear.ml/docs/latest/docs/configs/clearml_conf/>
 - ClearML Helm chart：`D:\Python\clearml-helm-charts`
 - 当前 ClearML vGPU 示例：`D:\Python\clearml\examples\volcano_vgpu`
