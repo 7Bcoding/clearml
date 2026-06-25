@@ -73,18 +73,42 @@ def _print_dist_diagnostics(rank, world_size, backend, master_addr, master_port)
     _run_diag("ip route", ["ip", "route"])
 
 
-def _logger():
+def _clearml_task(rank):
     task_id = os.environ.get("CLEARML_TASK_ID", "").strip()
-    if not task_id:
-        return None
+    if rank != 0 or not task_id:
+        return None, None
     try:
         from clearml import Task
 
         task = Task.get_task(task_id=task_id)
-        return task.get_logger()
+        task.mark_started(force=True)
+        logger = task.get_logger()
+        logger.report_text("Volcano Job rank0 attached to ClearML Task %s" % task_id)
+        return task, logger
     except Exception as exc:
         print("WARN: ClearML logging disabled: %s" % exc)
-        return None
+        return None, None
+
+
+def _mark_clearml_completed(task, message):
+    if task is None:
+        return
+    try:
+        task.flush(wait_for_uploads=True)
+        task.mark_completed(force=True, status_message=message)
+    except Exception as exc:
+        print("WARN: ClearML mark_completed failed: %s" % exc)
+
+
+def _mark_clearml_failed(task, exc):
+    if task is None:
+        return
+    try:
+        task.get_logger().report_text("FAILED: %s" % exc)
+        task.flush(wait_for_uploads=True)
+        task.mark_failed(force=True, status_reason="failed", status_message=str(exc))
+    except Exception as mark_exc:
+        print("WARN: ClearML mark_failed failed: %s" % mark_exc)
 
 
 def main():
@@ -118,8 +142,6 @@ def main():
 
     if not master_addr:
         raise RuntimeError("MASTER_ADDR empty; Volcano Job svc 插件或 env 未配置")
-    if require_cuda and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available; check runtimeClassName/CDI/vGPU injection")
 
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = str(master_port)
@@ -127,41 +149,53 @@ def main():
     os.environ["WORLD_SIZE"] = str(nnodes)
     os.environ["LOCAL_RANK"] = "0"
 
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
-    if backend == "nccl":
-        cuda_count = torch.cuda.device_count()
-        if cuda_count != 1:
-            print("WARN: this smoke script is one process per Pod and uses cuda:0 only; visible GPUs=%s" % cuda_count)
-        torch.cuda.set_device(0)
-        print("CUDA device: %s" % torch.cuda.get_device_name(0))
-    _print_dist_diagnostics(node_rank, nnodes, backend, master_addr, master_port)
+    clearml_task, logger = _clearml_task(node_rank)
+    process_group_ready = False
+    try:
+        if require_cuda and not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available; check runtimeClassName/CDI/vGPU injection")
 
-    dist.init_process_group(
-        backend=backend,
-        rank=node_rank,
-        world_size=nnodes,
-        timeout=timedelta(seconds=args.dist_timeout_sec),
-    )
-    device = torch.device("cuda", 0) if backend == "nccl" else torch.device("cpu")
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if backend == "nccl":
+            cuda_count = torch.cuda.device_count()
+            if cuda_count != 1:
+                print("WARN: this smoke script is one process per Pod and uses cuda:0 only; visible GPUs=%s" % cuda_count)
+            torch.cuda.set_device(0)
+            print("CUDA device: %s" % torch.cuda.get_device_name(0))
+        _print_dist_diagnostics(node_rank, nnodes, backend, master_addr, master_port)
 
-    t = torch.ones(1, device=device) * (node_rank + 1)
-    dist.all_reduce(t, op=dist.ReduceOp.SUM)
-    expected = float(nnodes * (nnodes + 1) / 2)
-    ok = abs(float(t.item()) - expected) < 1e-3
-
-    logger = _logger() if node_rank == 0 else None
-    if logger is not None:
-        logger.report_scalar("smoke", "allreduce_sum", float(t.item()), iteration=0)
-        logger.report_single_value("allreduce_ok", 1.0 if ok else 0.0)
-        logger.report_text(
-            "Volcano Job smoke: sum=%s expected=%s ok=%s MASTER_ADDR=%s NODE_RANK=%s"
-            % (t.item(), expected, ok, master_addr, node_rank)
+        dist.init_process_group(
+            backend=backend,
+            rank=node_rank,
+            world_size=nnodes,
+            timeout=timedelta(seconds=args.dist_timeout_sec),
         )
+        process_group_ready = True
+        device = torch.device("cuda", 0) if backend == "nccl" else torch.device("cpu")
 
-    dist.destroy_process_group()
-    print("rank=%s DONE ok=%s sum=%s MASTER_ADDR=%s" % (node_rank, ok, float(t.item()), master_addr))
-    if not ok:
-        raise RuntimeError("all_reduce mismatch")
+        t = torch.ones(1, device=device) * (node_rank + 1)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        expected = float(nnodes * (nnodes + 1) / 2)
+        ok = abs(float(t.item()) - expected) < 1e-3
+
+        if logger is not None:
+            logger.report_scalar("smoke", "allreduce_sum", float(t.item()), iteration=0)
+            logger.report_single_value("allreduce_ok", 1.0 if ok else 0.0)
+            logger.report_text(
+                "Volcano Job smoke: sum=%s expected=%s ok=%s MASTER_ADDR=%s NODE_RANK=%s"
+                % (t.item(), expected, ok, master_addr, node_rank)
+            )
+
+        print("rank=%s DONE ok=%s sum=%s MASTER_ADDR=%s" % (node_rank, ok, float(t.item()), master_addr))
+        if not ok:
+            raise RuntimeError("all_reduce mismatch")
+        _mark_clearml_completed(clearml_task, "Volcano Job smoke completed")
+    except Exception as exc:
+        _mark_clearml_failed(clearml_task, exc)
+        raise
+    finally:
+        if process_group_ready:
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

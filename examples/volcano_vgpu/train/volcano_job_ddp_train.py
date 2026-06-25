@@ -96,15 +96,39 @@ def _node_rank() -> int:
 def _clearml_handles(rank: int):
     task_id = os.environ.get("CLEARML_TASK_ID", "").strip()
     if rank != 0 or not task_id:
-        return None, None
+        return None, None, None
     try:
         from clearml import OutputModel, Task
 
         task = Task.get_task(task_id=task_id)
-        return task.get_logger(), OutputModel(task=task, framework="pytorch", name="volcano-job-ddp")
+        task.mark_started(force=True)
+        logger = task.get_logger()
+        logger.report_text("Volcano Job rank0 attached to ClearML Task %s" % task_id)
+        return task, logger, OutputModel(task=task, framework="pytorch", name="volcano-job-ddp")
     except Exception as exc:
         print("WARN: ClearML logging disabled: %s" % exc)
-        return None, None
+        return None, None, None
+
+
+def _mark_clearml_completed(task, message):
+    if task is None:
+        return
+    try:
+        task.flush(wait_for_uploads=True)
+        task.mark_completed(force=True, status_message=message)
+    except Exception as exc:
+        print("WARN: ClearML mark_completed failed: %s" % exc)
+
+
+def _mark_clearml_failed(task, exc):
+    if task is None:
+        return
+    try:
+        task.get_logger().report_text("FAILED: %s" % exc)
+        task.flush(wait_for_uploads=True)
+        task.mark_failed(force=True, status_reason="failed", status_message=str(exc))
+    except Exception as mark_exc:
+        print("WARN: ClearML mark_failed failed: %s" % mark_exc)
 
 
 class TinyClassifier(nn.Module):
@@ -159,120 +183,129 @@ def main():
     master_addr = os.environ.get("MASTER_ADDR", "").strip()
     master_port = os.environ.get("MASTER_PORT", "29500").strip()
 
-    if not master_addr:
-        raise RuntimeError("MASTER_ADDR empty; Volcano Job svc plugin or env is not configured")
-    if args.require_cuda and not torch.cuda.is_available():
-        raise RuntimeError("CUDA is not available; check runtimeClassName/CDI/vGPU injection")
-
     os.environ["MASTER_ADDR"] = master_addr
     os.environ["MASTER_PORT"] = master_port
     os.environ["RANK"] = str(rank)
     os.environ["WORLD_SIZE"] = str(world_size)
     os.environ["LOCAL_RANK"] = "0"
 
-    backend = "nccl" if torch.cuda.is_available() else "gloo"
-    if backend == "nccl":
-        cuda_count = torch.cuda.device_count()
-        if cuda_count != 1:
-            print("WARN: this training script is one process per Pod and uses cuda:0 only; visible GPUs=%s" % cuda_count)
-        torch.cuda.set_device(0)
-        device = torch.device("cuda", 0)
-    else:
-        device = torch.device("cpu")
+    clearml_task, logger, output_model = _clearml_handles(rank)
+    process_group_ready = False
+    try:
+        if not master_addr:
+            raise RuntimeError("MASTER_ADDR empty; Volcano Job svc plugin or env is not configured")
+        if args.require_cuda and not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available; check runtimeClassName/CDI/vGPU injection")
 
-    print(
-        "DDP start: rank=%s world_size=%s backend=%s MASTER_ADDR=%s MASTER_PORT=%s"
-        % (rank, world_size, backend, master_addr, master_port)
-    )
-    if device.type == "cuda":
-        print("CUDA device: %s" % torch.cuda.get_device_name(0))
-    _print_dist_diagnostics(rank, world_size, backend, master_addr, master_port)
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        if backend == "nccl":
+            cuda_count = torch.cuda.device_count()
+            if cuda_count != 1:
+                print("WARN: this training script is one process per Pod and uses cuda:0 only; visible GPUs=%s" % cuda_count)
+            torch.cuda.set_device(0)
+            device = torch.device("cuda", 0)
+        else:
+            device = torch.device("cpu")
 
-    dist.init_process_group(
-        backend=backend,
-        rank=rank,
-        world_size=world_size,
-        timeout=timedelta(seconds=args.dist_timeout_sec),
-    )
-
-    torch.manual_seed(args.seed + rank)
-    dataset = _make_dataset(args.samples, args.input_dim, args.num_classes, args.seed)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    loader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        sampler=sampler,
-        num_workers=args.num_workers,
-        pin_memory=(device.type == "cuda"),
-    )
-
-    model = TinyClassifier(args.input_dim, args.hidden, args.num_classes).to(device)
-    if device.type == "cuda":
-        model = DDP(model, device_ids=[0], output_device=0)
-    else:
-        model = DDP(model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    criterion = nn.CrossEntropyLoss()
-
-    logger, output_model = _clearml_handles(rank)
-    if logger is not None:
-        logger.report_text(
-            "Volcano Job DDP training: world_size=%s batch_size=%s samples=%s"
-            % (world_size, args.batch_size, args.samples)
-        )
-
-    last_global_loss = 0.0
-    for epoch in range(args.epochs):
-        sampler.set_epoch(epoch)
-        model.train()
-        total_loss = 0.0
-        total_correct = 0
-        total_seen = 0
-
-        for features, target in loader:
-            features = features.to(device, non_blocking=True)
-            target = target.to(device, non_blocking=True)
-            optimizer.zero_grad(set_to_none=True)
-            output = model(features)
-            loss = criterion(output, target)
-            loss.backward()
-            optimizer.step()
-
-            total_loss += float(loss.item()) * int(target.numel())
-            total_correct += int((output.argmax(dim=1) == target).sum().item())
-            total_seen += int(target.numel())
-
-        metrics = torch.tensor(
-            [total_loss, float(total_correct), float(total_seen)],
-            dtype=torch.float64,
-            device=device,
-        )
-        dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
-        global_loss = float(metrics[0].item() / max(metrics[2].item(), 1.0))
-        global_acc = float(metrics[1].item() / max(metrics[2].item(), 1.0))
-        last_global_loss = global_loss
-
-        if rank == 0 and logger is not None:
-            logger.report_scalar("train", "loss", global_loss, iteration=epoch)
-            logger.report_scalar("train", "accuracy", global_acc, iteration=epoch)
         print(
-            "rank=%s epoch=%s loss=%.6f acc=%.4f local_seen=%s"
-            % (rank, epoch, global_loss, global_acc, total_seen)
+            "DDP start: rank=%s world_size=%s backend=%s MASTER_ADDR=%s MASTER_PORT=%s"
+            % (rank, world_size, backend, master_addr, master_port)
+        )
+        if device.type == "cuda":
+            print("CUDA device: %s" % torch.cuda.get_device_name(0))
+        _print_dist_diagnostics(rank, world_size, backend, master_addr, master_port)
+
+        dist.init_process_group(
+            backend=backend,
+            rank=rank,
+            world_size=world_size,
+            timeout=timedelta(seconds=args.dist_timeout_sec),
+        )
+        process_group_ready = True
+
+        torch.manual_seed(args.seed + rank)
+        dataset = _make_dataset(args.samples, args.input_dim, args.num_classes, args.seed)
+        sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        loader = DataLoader(
+            dataset,
+            batch_size=args.batch_size,
+            sampler=sampler,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
         )
 
-    if rank == 0:
-        os.makedirs(args.output_dir, exist_ok=True)
-        ckpt_path = os.path.join(args.output_dir, "model.pt")
-        torch.save(model.module.state_dict(), ckpt_path)
-        if output_model is not None:
-            output_model.update_weights(ckpt_path)
-        if logger is not None:
-            logger.report_single_value("final_loss", last_global_loss)
-            logger.report_text("checkpoint=%s" % ckpt_path)
-        print("rank=0 checkpoint=%s" % ckpt_path)
+        model = TinyClassifier(args.input_dim, args.hidden, args.num_classes).to(device)
+        if device.type == "cuda":
+            model = DDP(model, device_ids=[0], output_device=0)
+        else:
+            model = DDP(model)
+        optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        criterion = nn.CrossEntropyLoss()
 
-    dist.destroy_process_group()
-    print("rank=%s DONE" % rank)
+        if logger is not None:
+            logger.report_text(
+                "Volcano Job DDP training: world_size=%s batch_size=%s samples=%s"
+                % (world_size, args.batch_size, args.samples)
+            )
+
+        last_global_loss = 0.0
+        for epoch in range(args.epochs):
+            sampler.set_epoch(epoch)
+            model.train()
+            total_loss = 0.0
+            total_correct = 0
+            total_seen = 0
+
+            for features, target in loader:
+                features = features.to(device, non_blocking=True)
+                target = target.to(device, non_blocking=True)
+                optimizer.zero_grad(set_to_none=True)
+                output = model(features)
+                loss = criterion(output, target)
+                loss.backward()
+                optimizer.step()
+
+                total_loss += float(loss.item()) * int(target.numel())
+                total_correct += int((output.argmax(dim=1) == target).sum().item())
+                total_seen += int(target.numel())
+
+            metrics = torch.tensor(
+                [total_loss, float(total_correct), float(total_seen)],
+                dtype=torch.float64,
+                device=device,
+            )
+            dist.all_reduce(metrics, op=dist.ReduceOp.SUM)
+            global_loss = float(metrics[0].item() / max(metrics[2].item(), 1.0))
+            global_acc = float(metrics[1].item() / max(metrics[2].item(), 1.0))
+            last_global_loss = global_loss
+
+            if rank == 0 and logger is not None:
+                logger.report_scalar("train", "loss", global_loss, iteration=epoch)
+                logger.report_scalar("train", "accuracy", global_acc, iteration=epoch)
+            print(
+                "rank=%s epoch=%s loss=%.6f acc=%.4f local_seen=%s"
+                % (rank, epoch, global_loss, global_acc, total_seen)
+            )
+
+        if rank == 0:
+            os.makedirs(args.output_dir, exist_ok=True)
+            ckpt_path = os.path.join(args.output_dir, "model.pt")
+            torch.save(model.module.state_dict(), ckpt_path)
+            if output_model is not None:
+                output_model.update_weights(ckpt_path)
+            if logger is not None:
+                logger.report_single_value("final_loss", last_global_loss)
+                logger.report_text("checkpoint=%s" % ckpt_path)
+            print("rank=0 checkpoint=%s" % ckpt_path)
+
+        print("rank=%s DONE" % rank)
+        _mark_clearml_completed(clearml_task, "Volcano Job DDP training completed")
+    except Exception as exc:
+        _mark_clearml_failed(clearml_task, exc)
+        raise
+    finally:
+        if process_group_ready:
+            dist.destroy_process_group()
 
 
 if __name__ == "__main__":

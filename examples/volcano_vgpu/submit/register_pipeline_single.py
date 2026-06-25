@@ -36,6 +36,22 @@ DEFAULT_TRAIN_QUEUE = "volcano-queue"
 DEFAULT_SERVICES_QUEUE = "services"
 
 
+def _start_or_explain_missing_services_queue(pipe: PipelineController, queue: str) -> None:
+    try:
+        pipe.start(queue=queue)
+    except ValueError as exc:
+        if "Could not find queue" not in str(exc):
+            raise
+        raise SystemExit(
+            "\nPipeline controller queue %r does not exist in ClearML.\n"
+            "Fix one of the following:\n"
+            "  1. Run this script with --local to keep the controller on this machine.\n"
+            "  2. Create a ClearML queue named %r and run a CPU/services agent on it.\n"
+            "Training steps still use pipeline.queue (default: %r).\n"
+            % (queue, queue, DEFAULT_TRAIN_QUEUE)
+        ) from exc
+
+
 def _warn_if_base_task_missing() -> None:
     t = Task.get_task(project_name=BASE_PROJECT, task_name=BASE_TASK_NAME, allow_archived=False)
     if t is None:
@@ -117,7 +133,7 @@ def main() -> None:
             "Enqueueing pipeline controller to queue=%s (training steps -> pipeline.queue)"
             % args.services_queue
         )
-        pipe.start(queue=args.services_queue)
+        _start_or_explain_missing_services_queue(pipe, args.services_queue)
 
     print("Pipeline registered/started: %s / %s v%s" % (BASE_PROJECT, PIPELINE_NAME, PIPELINE_VERSION))
     print("WebUI: Pipelines -> %s -> '%s' -> + NEW RUN" % (BASE_PROJECT, PIPELINE_NAME))
