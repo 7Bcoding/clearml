@@ -1,0 +1,62 @@
+# Per-node sharing-mode template.
+#
+# Replace every node name before applying. The plugin only applies entries
+# whose "name" exactly matches spec.nodeName / kubernetes.io/hostname.
+#
+# Suggested labels:
+#   4090 HAMi: kubectl label node <node> gpu.present=true gpu.product=4090 gpu.mode=hami-core --overwrite
+#   A100 HAMi: kubectl label node <node> gpu.present=true gpu.product=a100 gpu.mode=hami-core --overwrite
+#   A100 MIG:  kubectl label node <node> gpu.present=true gpu.product=a100 gpu.mode=mig --overwrite
+#
+# For A100 MIG nodes, enable MIG on the node before switching operatingmode:
+#   sudo nvidia-smi -i <gpu-index> -mig 1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: volcano-vgpu-node-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/component: volcano-vgpu-node-plugin
+data:
+  config.json: |
+    {
+      "nodeconfig": [
+        {
+          "name": "gpu-4090-01",
+          "operatingmode": "hami-core",
+          "devicememoryscaling": 1.0,
+          "devicecorescaling": 1.0,
+          "devicesplitcount": 10,
+          "migstrategy": "none",
+          "filterdevices": {
+            "uuid": [],
+            "index": []
+          }
+        },
+        {
+          "name": "gpu-a100-hami-01",
+          "operatingmode": "hami-core",
+          "devicememoryscaling": 1.0,
+          "devicecorescaling": 1.0,
+          "devicesplitcount": 10,
+          "migstrategy": "none",
+          "filterdevices": {
+            "uuid": [],
+            "index": []
+          }
+        },
+        {
+          "name": "gpu-a100-mig-01",
+          "operatingmode": "mig",
+          "devicememoryscaling": 1.0,
+          "devicecorescaling": 1.0,
+          "devicesplitcount": 7,
+          "migstrategy": "mixed",
+          "filterdevices": {
+            "uuid": [],
+            "index": []
+          }
+        }
+      ]
+    }

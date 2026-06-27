@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: canary-4090-hami
+  namespace: default
+  annotations:
+    volcano.sh/vgpu-mode: "hami-core"
+spec:
+  schedulerName: volcano
+  runtimeClassName: nvidia
+  restartPolicy: Never
+  nodeSelector:
+    gpu.product: "4090"
+    gpu.mode: hami-core
+  tolerations:
+    - key: gpu.clearml/4090
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  containers:
+    - name: cuda
+      image: nvidia/cuda:12.4.1-base-ubuntu22.04
+      command: ["/bin/bash", "-lc"]
+      args:
+        - |
+          nvidia-smi -L
+          nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits
+      resources:
+        limits:
+          volcano.sh/vgpu-number: "1"
+          volcano.sh/vgpu-memory: "4"
+          volcano.sh/vgpu-cores: "30"
+        requests:
+          cpu: "4"
+          memory: 16Gi
+          volcano.sh/vgpu-number: "1"
+          volcano.sh/vgpu-memory: "4"
+          volcano.sh/vgpu-cores: "30"

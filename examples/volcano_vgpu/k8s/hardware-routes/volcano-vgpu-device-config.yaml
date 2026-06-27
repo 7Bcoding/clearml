@@ -1,0 +1,84 @@
+# Base device-plugin config for mixed HAMi-core and Dynamic MIG routes.
+#
+# This mirrors the upstream volcano-vgpu-device-plugin ConfigMap shape:
+#   data.device-config.yaml -> nvidia: ...
+#
+# Apply only after backing up the live config:
+#   kubectl -n kube-system get cm volcano-vgpu-device-config -o yaml > volcano-vgpu-device-config.backup.yaml
+#
+# The key setting for this repo is gpuMemoryFactor=1024, so ClearML VGPU
+# values use GiB integers and are passed directly to volcano.sh/vgpu-memory.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: volcano-vgpu-device-config
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/component: volcano-vgpu-device-plugin
+data:
+  device-config.yaml: |-
+    nvidia:
+      resourceCountName: volcano.sh/vgpu-number
+      resourceMemoryName: volcano.sh/vgpu-memory
+      resourceMemoryPercentageName: volcano.sh/vgpu-memory-percentage
+      resourceCoreName: volcano.sh/vgpu-cores
+      overwriteEnv: false
+      defaultMemory: 0
+      defaultCores: 0
+      defaultGPUNum: 1
+      deviceSplitCount: 10
+      deviceMemoryScaling: 1
+      deviceCoreScaling: 1
+      gpuMemoryFactor: 1024
+      knownMigGeometries:
+        - models: ["A100-SXM4-40GB", "A100-40GB-PCIe", "A100-PCIE-40GB"]
+          allowedGeometries:
+            - group: group1
+              geometries:
+                - name: 1g.5gb
+                  memory: 5120
+                  count: 7
+            - group: group2
+              geometries:
+                - name: 2g.10gb
+                  memory: 10240
+                  count: 3
+                - name: 1g.5gb
+                  memory: 5120
+                  count: 1
+            - group: group3
+              geometries:
+                - name: 3g.20gb
+                  memory: 20480
+                  count: 2
+            - group: group4
+              geometries:
+                - name: 7g.40gb
+                  memory: 40960
+                  count: 1
+        - models: ["A100-SXM4-80GB", "A100-80GB-PCIe", "A100-PCIE-80GB"]
+          allowedGeometries:
+            - group: group1
+              geometries:
+                - name: 1g.10gb
+                  memory: 9728
+                  count: 7
+            - group: group2
+              geometries:
+                - name: 2g.20gb
+                  memory: 19968
+                  count: 3
+                - name: 1g.10gb
+                  memory: 9728
+                  count: 1
+            - group: group3
+              geometries:
+                - name: 3g.40gb
+                  memory: 40192
+                  count: 2
+            - group: group4
+              geometries:
+                - name: 7g.80gb
+                  memory: 80896
+                  count: 1

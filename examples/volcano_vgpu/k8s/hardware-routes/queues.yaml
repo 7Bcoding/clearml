@@ -1,0 +1,90 @@
+# Volcano Queue templates for separated GPU hardware routes.
+#
+# Assumptions used by these example quotas:
+#   - volcano-vgpu-device-plugin uses gpuMemoryFactor=1024, so vgpu-memory is GiB.
+#   - A100 examples assume A100 80GB nodes.
+#   - Tune every capability block from the real allocatable values:
+#       kubectl get nodes -o json | jq -r '.items[] |
+#         "\(.metadata.name) vgpu-number=\(.status.allocatable["volcano.sh/vgpu-number"]) vgpu-memory=\(.status.allocatable["volcano.sh/vgpu-memory"])"'
+#
+# Keep ClearML queues and Volcano queues with the same names.
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: gpu-4090-hami
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "64"
+    memory: 256Gi
+    volcano.sh/vgpu-number: "8"
+    volcano.sh/vgpu-memory: "92"
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: gpu-4090-hami-multinode
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "64"
+    memory: 256Gi
+    volcano.sh/vgpu-number: "8"
+    volcano.sh/vgpu-memory: "92"
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: gpu-a100-hami
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "128"
+    memory: 512Gi
+    volcano.sh/vgpu-number: "10"
+    volcano.sh/vgpu-memory: "80"
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: gpu-a100-hami-multinode
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "256"
+    memory: 1024Gi
+    volcano.sh/vgpu-number: "20"
+    volcano.sh/vgpu-memory: "160"
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: gpu-a100-mig
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "128"
+    memory: 512Gi
+    # A100-80GB group1 dynamic MIG is normally seven 1g.10gb slices.
+    volcano.sh/vgpu-number: "7"
+    volcano.sh/vgpu-memory: "70"
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: gpu-a100-mig-multinode
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "256"
+    memory: 1024Gi
+    # Example: two A100-80GB nodes, each exposing seven 1g.10gb slices.
+    volcano.sh/vgpu-number: "14"
+    volcano.sh/vgpu-memory: "140"

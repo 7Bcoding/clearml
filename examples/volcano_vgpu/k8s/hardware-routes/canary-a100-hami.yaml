@@ -1,0 +1,38 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: canary-a100-hami
+  namespace: default
+  annotations:
+    volcano.sh/vgpu-mode: "hami-core"
+spec:
+  schedulerName: volcano
+  runtimeClassName: nvidia
+  restartPolicy: Never
+  nodeSelector:
+    gpu.product: a100
+    gpu.mode: hami-core
+  tolerations:
+    - key: gpu.clearml/a100
+      operator: Equal
+      value: "true"
+      effect: NoSchedule
+  containers:
+    - name: cuda
+      image: nvidia/cuda:12.4.1-base-ubuntu22.04
+      command: ["/bin/bash", "-lc"]
+      args:
+        - |
+          nvidia-smi -L
+          nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader,nounits
+      resources:
+        limits:
+          volcano.sh/vgpu-number: "1"
+          volcano.sh/vgpu-memory: "20"
+          volcano.sh/vgpu-cores: "50"
+        requests:
+          cpu: "8"
+          memory: 32Gi
+          volcano.sh/vgpu-number: "1"
+          volcano.sh/vgpu-memory: "20"
+          volcano.sh/vgpu-cores: "50"

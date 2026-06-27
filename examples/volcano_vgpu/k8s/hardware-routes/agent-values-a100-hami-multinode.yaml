@@ -1,0 +1,99 @@
+clearml:
+  existingAgentk8sglueSecret: "clearml-agent-creds"
+
+agentk8sglue:
+  image:
+    repository: "allegroai/clearml-agent-k8s-base"
+    tag: "1.24-21"
+
+  replicaCount: 1
+
+  apiServerUrlReference: "http://10.10.36.6:30008"
+  fileServerUrlReference: "http://10.10.36.6:30081"
+  webServerUrlReference: "http://10.10.36.6:30080"
+  clearmlcheckCertificate: false
+
+  queue: gpu-a100-hami-multinode
+  createQueueIfNotExists: false
+  defaultContainerImage: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+
+  vgpuHook:
+    enabled: true
+    section: VGPU
+    gpuMemoryFactor: 1024
+    mode: hami-core
+    containerName: ""
+
+  extraEnvs:
+    - name: CLEARML_AGENT_NO_UPDATE
+      value: "true"
+
+  basePodTemplate:
+    schedulerName: volcano
+    runtimeClassName: nvidia
+    hostPID: true
+
+    annotations:
+      volcano.sh/vgpu-mode: "hami-core"
+      volcano.sh/queue-name: gpu-a100-hami-multinode
+      scheduling.volcano.sh/queue-name: gpu-a100-hami-multinode
+
+    resources:
+      requests:
+        cpu: "8"
+        memory: 32Gi
+
+    env:
+      - name: CLEARML_MULTI_NODE_MASTER_DEF_ADDR
+        valueFrom:
+          fieldRef:
+            fieldPath: status.podIP
+      - name: NCCL_DEBUG
+        value: "INFO"
+      - name: NCCL_IB_DISABLE
+        value: "1"
+      - name: NCCL_SOCKET_IFNAME
+        value: "eth0"
+      - name: PIP_CACHE_DIR
+        value: /root/.cache/pip
+      - name: CLEARML_AGENT_VENV_CACHE_PATH
+        value: /root/.clearml/venvs-cache
+      - name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+        value: "false"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+        value: '"/root/.cache/pip"'
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+        value: '"/root/.clearml/vcs-cache"'
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__MAX_ENTRIES
+        value: "20"
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__FREE_SPACE_THRESHOLD_GB
+        value: "10"
+
+    nodeSelector:
+      gpu.product: a100
+      gpu.mode: hami-core
+
+    tolerations:
+      - key: gpu.clearml/a100
+        operator: Equal
+        value: "true"
+        effect: NoSchedule
+
+    volumes:
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache/gpu-a100-hami-multinode/clearml
+          type: DirectoryOrCreate
+      - name: pip-cache
+        hostPath:
+          path: /data/clearml-cache/gpu-a100-hami-multinode/pip
+          type: DirectoryOrCreate
+    volumeMounts:
+      - name: clearml-cache
+        mountPath: /root/.clearml
+      - name: pip-cache
+        mountPath: /root/.cache/pip
