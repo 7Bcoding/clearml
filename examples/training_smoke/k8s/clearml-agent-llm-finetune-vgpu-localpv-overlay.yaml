@@ -1,0 +1,17 @@
+# Overlay values for using host local PV.
+#
+# Use together with:
+#   -f clearml-agent-llm-finetune-vgpu-values.yaml
+#   -f clearml-agent-llm-finetune-vgpu-localpv-overlay.yaml
+#
+# Replace <GPU_NODE_HOSTNAME> with the same hostname used in
+# local-pv-ai-data.example.yaml.
+#
+# Reason:
+# Local PV is tied to one node, so the ClearML training Pod must be scheduled
+# to that node. Explicit nodeSelector avoids accidental scheduling elsewhere.
+
+agentk8sglue:
+  basePodTemplate:
+    nodeSelector:
+      kubernetes.io/hostname: <GPU_NODE_HOSTNAME>

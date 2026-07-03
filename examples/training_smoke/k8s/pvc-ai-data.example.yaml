@@ -1,0 +1,18 @@
+# Shared RWX PVC for AI model/data/output storage.
+#
+# Replace storageClassName with your NAS/NFS/CSI storage class.
+# In production this PVC usually maps to NAS or distributed storage.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ai-data-pvc
+  namespace: clearml
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Ti
+  storageClassName: nfs-client
+

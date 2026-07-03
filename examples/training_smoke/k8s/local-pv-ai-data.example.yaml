@@ -1,0 +1,65 @@
+# Host local PV example for smoke testing.
+#
+# Use this when you want to mount one GPU node's local disk into ClearML
+# training Pods, without NFS/NAS.
+#
+# BEFORE applying:
+# 1. Pick one GPU node, for example:
+#      kubectl get nodes
+# 2. On that node, create the local directory:
+#      sudo mkdir -p /data/ai-local
+#      sudo mkdir -p /data/ai-local/{models,datasets,output,cache,clearml}
+#      sudo chmod -R 0777 /data/ai-local
+# 3. Replace <GPU_NODE_HOSTNAME> below with the node's Kubernetes hostname:
+#      kubectl get node <node> --show-labels | grep kubernetes.io/hostname
+#
+# IMPORTANT:
+# - This is node-local storage. Pods must run on the same node.
+# - This is good for smoke tests and single-node validation.
+# - It is not a multi-node shared storage replacement.
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-ai-data
+provisioner: kubernetes.io/no-provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: local-ai-data-pv-gpu-node
+spec:
+  capacity:
+    storage: 2Ti
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-ai-data
+  local:
+    path: /data/ai-local
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values:
+                - gpu-server-6
+                - gpu-server-5
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ai-data-pvc
+  namespace: clearml
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-ai-data
+  resources:
+    requests:
+      storage: 2Ti
+

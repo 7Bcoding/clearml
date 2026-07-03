@@ -1,0 +1,22 @@
+# Volcano Queue for LLM fine-tuning on HAMi/vGPU clusters.
+#
+# IMPORTANT:
+# - Use volcano.sh/vgpu-* resources, not nvidia.com/gpu.
+# - capability is a queue quota. Adjust it to your real cluster capacity.
+# - With gpu-memory-factor=1024, vgpu-memory is usually expressed in GiB
+#   in the ClearML VGPU section in this repository's examples.
+---
+apiVersion: scheduling.volcano.sh/v1beta1
+kind: Queue
+metadata:
+  name: llm-finetune-vgpu
+spec:
+  weight: 1
+  reclaimable: true
+  capability:
+    cpu: "64"
+    memory: 512Gi
+    volcano.sh/vgpu-number: "8"
+    volcano.sh/vgpu-memory: "192"
+    volcano.sh/vgpu-cores: "800"
+

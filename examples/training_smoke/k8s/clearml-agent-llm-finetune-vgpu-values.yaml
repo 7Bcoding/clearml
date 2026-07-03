@@ -1,0 +1,160 @@
+# ClearML Agent values for LLM fine-tuning queue on Volcano + HAMi/vGPU.
+#
+# This values file is designed for open-source ClearML Agent Helm chart usage:
+#   helm upgrade --install clearml-agent-llm-finetune clearml/clearml-agent \
+#     -n clearml \
+#     -f examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-values.yaml
+#
+# It listens to one ClearML queue:
+#   llm-finetune-vgpu
+#
+# The training Pods get:
+#   - schedulerName: volcano
+#   - runtimeClassName: nvidia
+#   - volcano.sh/vgpu-mode: hami-core
+#   - /data mounted from ai-data-pvc
+#   - /dev/shm backed by memory emptyDir
+#   - HF / ModelScope / pip / ClearML caches configured
+#
+# Per-task vGPU resources are injected by vgpuHook from the ClearML
+# CONFIGURATION -> VGPU section:
+#   vgpu_number / vgpu_memory / vgpu_cores
+
+clearml:
+  # Create this secret separately, or reuse your existing ClearML agent secret.
+  # It should contain the ClearML API credentials used by the K8s glue agent.
+  existingAgentk8sglueSecret: "clearml-agent-creds"
+
+agentk8sglue:
+  image:
+    repository: "allegroai/clearml-agent-k8s-base"
+    tag: "1.24-21"
+
+  replicaCount: 1
+
+  # TODO: replace with your ClearML Server addresses.
+  apiServerUrlReference: "http://10.10.36.6:30008"
+  fileServerUrlReference: "http://10.10.36.6:30081"
+  webServerUrlReference: "http://10.10.36.6:30080"
+  clearmlcheckCertificate: false
+
+  # One agent deployment listens to one queue. This is the simplest and most
+  # predictable pattern for open-source ClearML.
+  queue: llm-finetune-vgpu
+  createQueueIfNotExists: false
+
+  # Default image for tasks that do not set task.set_base_docker(...).
+  # Prefer an image with CUDA + PyTorch + LLaMA-Factory preinstalled.
+  defaultContainerImage: harbor.example.com/ai/llamafactory:latest
+
+  # The custom vGPU hook reads ClearML CONFIGURATION -> VGPU and injects
+  # volcano.sh/vgpu-* limits into the generated training Pod.
+  vgpuHook:
+    enabled: true
+    section: VGPU
+    gpuMemoryFactor: 1024
+    mode: hami-core
+    containerName: ""
+
+  extraEnvs:
+    - name: "CLEARML_AGENT_NO_UPDATE"
+      value: "true"
+
+  basePodTemplate:
+    schedulerName: volcano
+    runtimeClassName: nvidia
+    hostPID: true
+
+    annotations:
+      volcano.sh/vgpu-mode: "hami-core"
+      # Keep the PodGroup in the intended Volcano queue. If your Volcano
+      # version uses a different key, try scheduling.volcano.sh/queue-name.
+      volcano.sh/queue-name: llm-finetune-vgpu
+
+    # Do NOT set nvidia.com/gpu here in a HAMi/vGPU-only cluster.
+    # vGPU limits are injected dynamically by vgpuHook from Task VGPU config.
+    resources:
+      requests:
+        cpu: "8"
+        memory: 64Gi
+
+    env:
+      # Framework/runtime caches on the shared /data volume.
+      - name: HF_HOME
+        value: /data/cache/huggingface
+      - name: HUGGINGFACE_HUB_CACHE
+        value: /data/cache/huggingface/hub
+      - name: TRANSFORMERS_CACHE
+        value: /data/cache/huggingface/transformers
+      - name: HF_DATASETS_CACHE
+        value: /data/cache/huggingface/datasets
+      - name: MODELSCOPE_CACHE
+        value: /data/cache/modelscope
+      - name: TORCH_HOME
+        value: /data/cache/torch
+      - name: PIP_CACHE_DIR
+        value: /data/cache/pip
+
+      # Common LLM training envs.
+      - name: PYTORCH_CUDA_ALLOC_CONF
+        value: expandable_segments:True
+      - name: TOKENIZERS_PARALLELISM
+        value: "false"
+      - name: NCCL_DEBUG
+        value: "INFO"
+      - name: NCCL_IB_DISABLE
+        value: "1"
+      - name: NCCL_SOCKET_IFNAME
+        value: "eth0"
+
+      # ClearML agent cache. This speeds repeated runs but is not a security
+      # isolation boundary. Use separate queues/namespaces for tenant isolation.
+      - name: CLEARML_AGENT_VENV_CACHE_PATH
+        value: /root/.clearml/venvs-cache
+      - name: CLEARML_AGENT__AGENT__PACKAGE_MANAGER__SYSTEM_SITE_PACKAGES
+        value: "false"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__PIP_DOWNLOAD_CACHE__PATH
+        value: '"/data/cache/pip"'
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__ENABLED
+        value: "true"
+      - name: CLEARML_AGENT__AGENT__VCS_CACHE__PATH
+        value: '"/root/.clearml/vcs-cache"'
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__MAX_ENTRIES
+        value: "20"
+      - name: CLEARML_AGENT__AGENT__VENVS_CACHE__FREE_SPACE_THRESHOLD_GB
+        value: "20"
+
+    volumes:
+      # Shared models/datasets/output/cache PVC.
+      - name: ai-data
+        persistentVolumeClaim:
+          claimName: ai-data-pvc
+
+      # Large shm is important for PyTorch dataloaders and LLM frameworks.
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 128Gi
+
+      # Queue-scoped ClearML metadata/cache. hostPath is optional; if you do
+      # not want node-local cache, replace with emptyDir or another PVC.
+      - name: clearml-cache
+        hostPath:
+          path: /data/clearml-cache/llm-finetune-vgpu/clearml
+          type: DirectoryOrCreate
+
+    volumeMounts:
+      - name: ai-data
+        mountPath: /data
+      - name: dshm
+        mountPath: /dev/shm
+      - name: clearml-cache
+        mountPath: /root/.clearml
+
+    # TODO: adjust to your node labels. Keep the LLM queue on GPU/vGPU nodes.
+    nodeSelector:
+      gpu.present: "true"
+
+    tolerations: []

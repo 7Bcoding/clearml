@@ -1,0 +1,937 @@
+# ClearML LLM 微调冒烟测试 Runbook
+
+> 目标：用最小闭环验证 `ClearML + Kubernetes + Volcano + volcano-vgpu-device-plugin/HAMi-core + host local PV` 能承接 LLM 微调训练任务。  
+> 本次只验证训练链路，不验证 KServe 推理。  
+> 本次先不做 FiboCV，只跑 LLaMA-Factory 优先的 LLM FineTune 通用模板。  
+> 调研基准时间：2026-07-03。
+
+---
+
+## 0. 本次冒烟要验证什么
+
+本次冒烟只验证一条链路：
+
+```text
+ClearML Task
+-> ClearML Agent / K8s Glue
+-> Kubernetes Training Pod
+-> Volcano Scheduler
+-> HAMi/vGPU
+-> LLaMA-Factory 镜像
+-> SFT LoRA 1-2 step
+-> /data/output 产物 + ClearML 日志/Artifact
+```
+
+本次先使用一台 GPU 节点的本地目录作为 host local PV：
+
+```text
+GPU 节点本地：/data/ai-local
+训练 Pod 内：/data
+```
+
+先不引入 NFS/NAS/MinIO CSI，减少变量。等这条链路跑通后，再把 `/data` 从 host local PV 切换成共享存储。
+
+---
+
+## 1. 前置条件
+
+### 1.1 已有组件
+
+需要先确认：
+
+```text
+Kubernetes 集群可用
+Volcano 已安装
+volcano-vgpu-device-plugin/HAMi-core 已安装
+ClearML Server 可访问
+ClearML Agent Helm Chart 可安装
+kubectl / helm 可操作集群
+GPU 节点可以拉取 LLaMA-Factory 训练镜像
+```
+
+### 1.2 本地文件
+
+本仓库里已经准备好这些文件：
+
+```text
+examples/training_smoke/k8s/local-pv-ai-data.example.yaml
+examples/training_smoke/k8s/volcano-queue-llm-finetune-vgpu.yaml
+examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-values.yaml
+examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-localpv-overlay.yaml
+
+examples/training_smoke/llm_finetune_universal.py
+examples/training_smoke/requirements-smoke.txt
+```
+
+其中 `llm_finetune_universal.py` 是本次要跑的通用微调模板，支持：
+
+```text
+backend = llama-factory / ms-swift / custom
+```
+
+本次冒烟建议优先使用：
+
+```text
+backend = llama-factory
+```
+
+### 1.3 路径原则
+
+冒烟脚本参数里的路径都是 **训练 Pod 内路径**，不是提交脚本所在机器的路径。
+
+```text
+GPU 节点本地路径：/data/ai-local/models/xxx
+训练 Pod 内路径：/data/models/xxx
+```
+
+例如命令里填：
+
+```text
+--model-path /data/models/Qwen2.5-0.5B-Instruct
+--dataset-path /data/datasets/demo_sft/train.jsonl
+--output-dir /data/output/llamafactory-sft-lora-smoke
+```
+
+实际文件应该放在目标 GPU 节点：
+
+```text
+/data/ai-local/models/Qwen2.5-0.5B-Instruct
+/data/ai-local/datasets/demo_sft/train.jsonl
+/data/ai-local/output
+```
+
+不要填只在提交机存在的路径，例如：
+
+```text
+C:\Users\xxx\Downloads\model
+/home/user/local-models
+```
+
+---
+
+## 2. 第一步：选择 GPU 节点
+
+在有 `kubectl` 的机器上执行：
+
+```bash
+kubectl get nodes -o wide
+```
+
+选一台用于冒烟的 GPU 节点，例如：
+
+```text
+gpu-server-6
+```
+
+查看节点 hostname label：
+
+```bash
+kubectl get node gpu-server-6 --show-labels | tr ',' '\n' | grep kubernetes.io/hostname
+```
+
+记下：
+
+```text
+<GPU_NODE_HOSTNAME>
+```
+
+后面两个文件里都要指向同一个节点：
+
+```text
+examples/training_smoke/k8s/local-pv-ai-data.yaml 的 nodeAffinity
+examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-localpv-overlay.local.yaml 的 nodeSelector
+```
+
+---
+
+## 3. 第二步：准备 GPU 节点本地目录
+
+登录目标 GPU 节点：
+
+```bash
+ssh <gpu-node>
+```
+
+创建 local PV 目录：
+
+```bash
+sudo mkdir -p /data/ai-local/{models,datasets,output,cache,clearml}
+sudo chmod -R 0777 /data/ai-local
+```
+
+目录含义：
+
+```text
+/data/ai-local/models      -> Pod 内 /data/models
+/data/ai-local/datasets    -> Pod 内 /data/datasets
+/data/ai-local/output      -> Pod 内 /data/output
+/data/ai-local/cache       -> Pod 内 /data/cache
+/data/ai-local/clearml     -> 可选 ClearML 缓存
+```
+
+检查：
+
+```bash
+ls -lah /data/ai-local
+```
+
+---
+
+## 4. 第三步：准备模型、数据和镜像
+
+### 4.1 准备 LLaMA-Factory 镜像
+
+本次冒烟建议准备一个预装以下组件的镜像：
+
+```text
+CUDA / PyTorch
+transformers / datasets / peft / accelerate
+LLaMA-Factory
+clearml
+```
+
+示例镜像名：
+
+```text
+harbor.example.com/ai/llamafactory:latest
+```
+
+在 GPU 节点上确认可以拉取：
+
+```bash
+docker pull harbor.example.com/ai/llamafactory:latest
+```
+
+如果你们暂时只有 ms-swift 镜像，也可以先用同一个通用模板切到 `--backend ms-swift`，但本 Runbook 默认以 LLaMA-Factory 为主。
+
+### 4.2 准备冒烟模型
+
+建议用小模型，优先：
+
+```text
+Qwen2.5-0.5B-Instruct
+```
+
+下载到目标 GPU 节点的 local PV 目录。
+
+方式 A：Hugging Face：
+
+```bash
+hf download Qwen/Qwen2.5-0.5B-Instruct \
+  --local-dir /data/ai-local/models/Qwen2.5-0.5B-Instruct
+```
+
+方式 B：ModelScope：
+
+```bash
+modelscope download \
+  --model Qwen/Qwen2.5-0.5B-Instruct \
+  --local_dir /data/ai-local/models/Qwen2.5-0.5B-Instruct
+```
+
+方式 C：如果模型已经在别的机器：
+
+```bash
+rsync -avP /path/to/Qwen2.5-0.5B-Instruct/ \
+  <gpu-node>:/data/ai-local/models/Qwen2.5-0.5B-Instruct/
+```
+
+检查：
+
+```bash
+ls -lah /data/ai-local/models/Qwen2.5-0.5B-Instruct
+```
+
+至少应该能看到：
+
+```text
+config.json
+tokenizer 相关文件
+model 权重文件
+```
+
+### 4.3 准备冒烟数据
+
+建议准备一个极小 SFT JSONL 文件：
+
+```text
+/data/ai-local/datasets/demo_sft/train.jsonl
+```
+
+Pod 内对应：
+
+```text
+/data/datasets/demo_sft/train.jsonl
+```
+
+LLaMA-Factory 的 Alpaca 格式示例：
+
+```jsonl
+{"instruction":"你是谁？","input":"","output":"我是一个用于冒烟测试的助手。"}
+{"instruction":"请把下面的话改写得更正式。","input":"今天活儿挺多。","output":"今天的工作任务较为繁重。"}
+```
+
+检查：
+
+```bash
+ls -lah /data/ai-local/datasets/demo_sft
+head -n 2 /data/ai-local/datasets/demo_sft/train.jsonl
+```
+
+如果你要直接使用算法同学已有数据，例如 ToolACE：
+
+```text
+Host 路径：/data/ai-local/datasets/ToolACE/data.json
+Pod 路径： /data/datasets/ToolACE/data.json
+```
+
+后面命令里的参数改成：
+
+```text
+--dataset-path /data/datasets/ToolACE/data.json
+```
+
+---
+
+## 5. 第四步：复制并修改安装 YAML
+
+建议不要直接改 `.example.yaml`，先复制一份本地文件。
+
+在仓库根目录执行：
+
+```bash
+cp examples/training_smoke/k8s/local-pv-ai-data.example.yaml \
+   examples/training_smoke/k8s/local-pv-ai-data.yaml
+
+cp examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-localpv-overlay.yaml \
+   examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-localpv-overlay.local.yaml
+```
+
+把 local PV 文件里的 `nodeAffinity`，以及 Agent overlay 文件里的：
+
+```text
+<GPU_NODE_HOSTNAME>
+```
+
+都改成第二步选定的节点 hostname。
+
+例如：
+
+```text
+gpu-server-6
+```
+
+### 5.1 修改 local PV 容量
+
+打开：
+
+```text
+examples/training_smoke/k8s/local-pv-ai-data.yaml
+```
+
+按本地磁盘实际容量修改：
+
+```yaml
+capacity:
+  storage: 2Ti
+```
+
+如果只选一台 GPU 节点做冒烟，建议 `nodeAffinity` 里只保留这一台节点，降低调度误差。
+
+### 5.2 修改 ClearML Agent values
+
+打开：
+
+```text
+examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-values.yaml
+```
+
+必须确认/修改 ClearML Server 地址：
+
+```yaml
+apiServerUrlReference: "http://<clearml-api>"
+fileServerUrlReference: "http://<clearml-file-server>"
+webServerUrlReference: "http://<clearml-web>"
+```
+
+确认队列名：
+
+```yaml
+queue: llm-finetune-vgpu
+```
+
+确认默认镜像。建议使用 LLaMA-Factory 镜像：
+
+```yaml
+defaultContainerImage: harbor.example.com/ai/llamafactory:latest
+```
+
+即使这里没改，后面的提交命令也会通过 `--docker-image` 指定训练镜像；但为了减少误解，建议保持一致。
+
+### 5.3 检查 Pod Template 挂载
+
+确认 `basePodTemplate` 里有 `/data` 挂载：
+
+```yaml
+volumes:
+  - name: ai-data
+    persistentVolumeClaim:
+      claimName: ai-data-pvc
+
+volumeMounts:
+  - name: ai-data
+    mountPath: /data
+```
+
+确认使用 Volcano 和 HAMi：
+
+```yaml
+schedulerName: volcano
+runtimeClassName: nvidia
+annotations:
+  volcano.sh/vgpu-mode: "hami-core"
+  volcano.sh/queue-name: llm-finetune-vgpu
+```
+
+在 HAMi/vGPU-only 集群里不要配置：
+
+```text
+nvidia.com/gpu
+```
+
+### 5.4 修改 Volcano Queue capability
+
+打开：
+
+```text
+examples/training_smoke/k8s/volcano-queue-llm-finetune-vgpu.yaml
+```
+
+确认队列配额：
+
+```yaml
+capability:
+  cpu: "64"
+  memory: 512Gi
+  volcano.sh/vgpu-number: "8"
+  volcano.sh/vgpu-memory: "192"
+  volcano.sh/vgpu-cores: "800"
+```
+
+如果只是单卡冒烟，可以先保守一点：
+
+```yaml
+capability:
+  cpu: "16"
+  memory: 128Gi
+  volcano.sh/vgpu-number: "1"
+  volcano.sh/vgpu-memory: "24"
+  volcano.sh/vgpu-cores: "100"
+```
+
+这里的 `volcano.sh/vgpu-memory` 是队列总配额。当前模板约定 ClearML 里填的 `vgpu_memory=24` 表示 24GiB，并由 Agent vgpuHook 按 `gpuMemoryFactor=1024` 转换成 HAMi 需要的资源单位。
+
+---
+
+## 6. 第五步：安装 local PV / PVC
+
+在有 `kubectl` 的机器执行：
+
+```bash
+kubectl apply -f examples/training_smoke/k8s/local-pv-ai-data.yaml
+```
+
+检查 PV/PVC：
+
+```bash
+kubectl get storageclass local-ai-data
+kubectl get pv local-ai-data-pv-gpu-node
+kubectl -n clearml get pvc ai-data-pvc
+```
+
+预期：
+
+```text
+PV 存在
+PVC 存在
+PVC 可能先是 Pending
+```
+
+`WaitForFirstConsumer` 模式下，PVC 在训练 Pod 创建前 Pending 是正常的。
+
+---
+
+## 7. 第六步：安装 Volcano Queue
+
+```bash
+kubectl apply -f examples/training_smoke/k8s/volcano-queue-llm-finetune-vgpu.yaml
+```
+
+检查：
+
+```bash
+kubectl get queue llm-finetune-vgpu
+kubectl describe queue llm-finetune-vgpu
+```
+
+确认里面是：
+
+```text
+volcano.sh/vgpu-number
+volcano.sh/vgpu-memory
+volcano.sh/vgpu-cores
+```
+
+不要出现：
+
+```text
+nvidia.com/gpu
+```
+
+---
+
+## 8. 第七步：安装 LLM 微调 ClearML Agent
+
+### 8.1 检查 ClearML Agent Secret
+
+```bash
+kubectl -n clearml get secret clearml-agent-creds
+```
+
+如果不存在，需要先按你们 ClearML Agent 安装方式创建 API credentials secret。
+
+### 8.2 添加 Helm repo
+
+```bash
+helm repo add clearml https://clearml.github.io/clearml-helm-charts
+helm repo update
+```
+
+### 8.3 安装 Agent
+
+```bash
+helm upgrade --install clearml-agent-llm-finetune \
+  clearml/clearml-agent \
+  -n clearml \
+  -f examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-values.yaml \
+  -f examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-localpv-overlay.local.yaml
+```
+
+### 8.4 检查 Agent
+
+```bash
+kubectl -n clearml get pods | grep llm-finetune
+kubectl -n clearml get deploy | grep llm-finetune
+```
+
+看日志：
+
+```bash
+kubectl -n clearml logs deploy/clearml-agent-llm-finetune --tail=100
+```
+
+预期：
+
+```text
+Agent 正常启动
+监听 llm-finetune-vgpu 队列
+没有 ClearML API 认证错误
+```
+
+---
+
+## 9. 第八步：检查 vGPU 资源
+
+检查节点 allocatable：
+
+```bash
+kubectl get nodes -o json | jq -r '.items[] |
+  "\(.metadata.name) vgpu-number=\(.status.allocatable["volcano.sh/vgpu-number"]) vgpu-memory=\(.status.allocatable["volcano.sh/vgpu-memory"]) vgpu-cores=\(.status.allocatable["volcano.sh/vgpu-cores"])"'
+```
+
+预期目标 GPU 节点有：
+
+```text
+volcano.sh/vgpu-number
+volcano.sh/vgpu-memory
+volcano.sh/vgpu-cores
+```
+
+如果没有，先不要跑 ClearML 冒烟，先排查 `volcano-vgpu-device-plugin/HAMi-core`。
+
+---
+
+## 10. 第九步：提交 LLaMA-Factory 微调冒烟任务
+
+在配置好 ClearML SDK 的提交机上执行：
+
+```bash
+python examples/training_smoke/llm_finetune_universal.py \
+  --backend llama-factory \
+  --queue llm-finetune-vgpu \
+  --docker-image harbor.example.com/ai/llamafactory:latest \
+  --clearml-project training-template/llm \
+  --clearml-task-name llama-factory-sft-lora-smoke \
+  --model-path /data/models/Qwen2.5-0.5B-Instruct \
+  --dataset-path /data/datasets/demo_sft/train.jsonl \
+  --dataset-format alpaca \
+  --output-dir /data/output/llamafactory-sft-lora-smoke \
+  --train-method sft \
+  --finetuning-type lora \
+  --template qwen \
+  --max-steps 2 \
+  --per-device-train-batch-size 1 \
+  --gradient-accumulation-steps 1 \
+  --learning-rate 1e-5 \
+  --max-length 512 \
+  --lora-rank 8 \
+  --lora-alpha 16 \
+  --lora-target all \
+  --vgpu-number 1 \
+  --vgpu-memory 24 \
+  --vgpu-cores 100
+```
+
+参数含义：
+
+```text
+--backend llama-factory                         使用 LLaMA-Factory 后端
+--queue llm-finetune-vgpu                       投递到 LLM 微调队列
+--docker-image                                  训练 Pod 使用的镜像
+--model-path /data/models/...                   Pod 内模型路径
+--dataset-path /data/datasets/...               Pod 内数据路径
+--output-dir /data/output/...                   Pod 内输出路径
+--dataset-format alpaca                         数据按 Alpaca 格式解释
+--finetuning-type lora                          使用 LoRA 微调
+--max-steps 2                                   只跑 2 step，用于冒烟
+--vgpu-number / --vgpu-memory / --vgpu-cores    注入 volcano.sh/vgpu-* 资源
+```
+
+提交成功后，本地命令通常会很快结束，真正训练会由 ClearML Agent 在 K8s 中拉起 Pod。
+
+---
+
+## 11. 第十步：验收任务是否跑通
+
+### 11.1 ClearML WebUI 验收
+
+打开 ClearML WebUI，检查：
+
+```text
+项目：training-template/llm
+任务：llama-factory-sft-lora-smoke
+状态：Queued -> Running -> Completed
+Console：能看到 llamafactory-cli train 启动
+Console：至少跑完 1-2 step
+Artifacts：llm-finetune-manifest
+Artifacts：llamafactory-train-config
+Artifacts：llamafactory-dataset-info
+```
+
+### 11.2 K8s Pod 验收
+
+查找训练 Pod：
+
+```bash
+kubectl get pods -A | grep llama
+kubectl get pods -A | grep clearml
+```
+
+描述 Pod：
+
+```bash
+kubectl describe pod <llm-pod> -n <namespace> | egrep -i 'volcano|vgpu|runtimeClass|node|ai-data|/data|image'
+```
+
+确认：
+
+```text
+Pod 调度到 local PV 所在节点
+schedulerName = volcano
+runtimeClassName = nvidia
+/data 挂载成功
+volcano.sh/vgpu-* 资源存在
+没有 nvidia.com/gpu
+镜像是 harbor.example.com/ai/llamafactory:latest
+```
+
+### 11.3 GPU 节点输出验收
+
+登录目标 GPU 节点：
+
+```bash
+ssh <gpu-node>
+```
+
+检查输出目录：
+
+```bash
+ls -lah /data/ai-local/output/llamafactory-sft-lora-smoke
+```
+
+预期能看到 LLaMA-Factory 训练输出，例如：
+
+```text
+checkpoint 相关目录或文件
+trainer_state.json
+adapter_config.json
+adapter_model 相关文件
+```
+
+不同版本的 LLaMA-Factory 输出文件名可能略有差异，冒烟阶段以“任务进入 Pod、能读模型数据、能跑完 1-2 step、输出目录有内容”为准。
+
+---
+
+## 12. 第十一步：在 ClearML WebUI 复跑
+
+冒烟命令第一次提交成功后，后续算法同学可以不用命令行。
+
+操作：
+
+```text
+打开 ClearML WebUI
+进入 training-template/llm
+打开 llama-factory-sft-lora-smoke
+Clone
+修改 CONFIGURATION -> Args
+  backend
+  model_path
+  dataset_path
+  dataset_format
+  output_dir
+  train_method
+  finetuning_type
+  template
+  max_steps
+  per_device_train_batch_size
+  gradient_accumulation_steps
+  learning_rate
+  max_length
+  lora_rank
+  lora_alpha
+  lora_target
+修改 CONFIGURATION -> VGPU
+  vgpu_number
+  vgpu_memory
+  vgpu_cores
+Enqueue 到 llm-finetune-vgpu
+```
+
+这就是 Portal 出现之前的最小可用 LLM 微调入口。
+
+---
+
+## 13. 可选：切换到 ms-swift 后端
+
+如果暂时只有 ms-swift 镜像，可以使用同一个通用模板切 backend：
+
+```bash
+python examples/training_smoke/llm_finetune_universal.py \
+  --backend ms-swift \
+  --queue llm-finetune-vgpu \
+  --docker-image harbor.example.com/ai/ms-swift-cuda12.1:latest \
+  --clearml-project training-template/llm \
+  --clearml-task-name ms-swift-sft-lora-smoke \
+  --model-path /data/models/Qwen2.5-0.5B-Instruct \
+  --dataset-path /data/datasets/demo_sft/train.jsonl \
+  --output-dir /data/output/ms-swift-sft-lora-smoke \
+  --max-steps 2 \
+  --per-device-train-batch-size 1 \
+  --max-length 512 \
+  --vgpu-number 1 \
+  --vgpu-memory 24 \
+  --vgpu-cores 100
+```
+
+注意：本 Runbook 的主链路仍然是 LLaMA-Factory。ms-swift 只作为 LLM 微调备用验证路径。
+
+---
+
+## 14. 成功标准
+
+整体验收标准：
+
+```text
+1. local PV/PVC 可用
+2. llm-finetune-vgpu Volcano Queue 可用
+3. ClearML Agent 正常监听 llm-finetune-vgpu
+4. vGPU 资源使用 volcano.sh/vgpu-*，没有误用 nvidia.com/gpu
+5. LLaMA-Factory 训练任务能进入 K8s Pod
+6. Pod 能访问 /data/models 和 /data/datasets
+7. llamafactory-cli train 能启动
+8. 至少完成 1-2 step
+9. 输出文件写到 /data/ai-local/output
+10. ClearML Console 能看到日志
+11. ClearML Artifacts 能看到 manifest 和训练配置
+12. ClearML WebUI Clone 后能修改参数并重新 Enqueue
+```
+
+---
+
+## 15. 常见问题排查
+
+### 15.1 PVC 一直 Pending
+
+如果 local PV 使用 `WaitForFirstConsumer`，训练 Pod 创建前 Pending 是正常的。
+
+如果 Pod 创建后仍 Pending，检查：
+
+```bash
+kubectl describe pvc ai-data-pvc -n clearml
+kubectl describe pv local-ai-data-pv-gpu-node
+```
+
+重点看：
+
+```text
+nodeAffinity hostname 是否写错
+storageClassName 是否一致
+PVC namespace 是否是 clearml
+Pod nodeSelector 是否指向同一台 GPU 节点
+```
+
+### 15.2 Pod Pending
+
+检查：
+
+```bash
+kubectl describe pod <pod> -n <namespace>
+kubectl describe queue llm-finetune-vgpu
+```
+
+常见原因：
+
+```text
+VGPU 段没注入
+Volcano Queue capability 不够
+节点没有 volcano.sh/vgpu-*
+local PV 绑定节点和 nodeSelector 不一致
+误用了 nvidia.com/gpu
+```
+
+### 15.3 找不到模型或数据
+
+进入目标 GPU 节点检查：
+
+```bash
+ls -lah /data/ai-local/models
+ls -lah /data/ai-local/datasets
+```
+
+Pod 内路径应该是：
+
+```text
+/data/models
+/data/datasets
+```
+
+如果 host 上存在但 Pod 内不存在，检查 Agent values 的：
+
+```yaml
+volumeMounts:
+  - name: ai-data
+    mountPath: /data
+```
+
+### 15.4 Agent 认证失败
+
+检查：
+
+```bash
+kubectl -n clearml get secret clearml-agent-creds
+kubectl -n clearml logs deploy/clearml-agent-llm-finetune --tail=200
+```
+
+确认：
+
+```text
+apiServerUrlReference
+fileServerUrlReference
+webServerUrlReference
+secret 中的 access key / secret key
+```
+
+### 15.5 镜像拉取失败
+
+检查：
+
+```bash
+kubectl describe pod <pod> -n <namespace>
+```
+
+常见原因：
+
+```text
+defaultContainerImage 写错
+--docker-image 写错
+Harbor imagePullSecret 没配
+GPU 节点无法访问镜像仓库
+```
+
+### 15.6 llamafactory-cli 命令不存在
+
+说明训练镜像里没有预装 LLaMA-Factory。
+
+处理：
+
+```text
+换成已安装 LLaMA-Factory 的镜像
+或重新构建 harbor.example.com/ai/llamafactory:latest
+```
+
+进入镜像验证：
+
+```bash
+docker run --rm harbor.example.com/ai/llamafactory:latest \
+  bash -lc "which llamafactory-cli && llamafactory-cli version || true"
+```
+
+### 15.7 dataset_info.json 或数据格式报错
+
+本通用模板在传入 `--dataset-path` 时，会自动为 LLaMA-Factory 生成临时 `dataset_info.json`。
+
+如果数据格式报错，先确认：
+
+```text
+--dataset-format alpaca / sharegpt 是否填对
+JSON/JSONL 是否每行合法
+Alpaca 格式是否包含 instruction / input / output
+ShareGPT 格式是否包含 conversations
+```
+
+### 15.8 CUDA OOM
+
+冒烟阶段优先降低资源压力：
+
+```text
+--max-length 256
+--per-device-train-batch-size 1
+--gradient-accumulation-steps 1
+--max-steps 1
+--lora-rank 4
+```
+
+如果仍然 OOM，再提高：
+
+```text
+--vgpu-memory
+```
+
+或者换更小模型。
+
+---
+
+## 16. 本次冒烟后的下一步
+
+冒烟通过后再做：
+
+```text
+1. 把成功的 LLM Task Clone 成团队模板
+2. 固化 LLaMA-Factory 为默认 backend
+3. 保留 ms-swift / custom 作为高级入口
+4. 抽象模型下载、数据上传、路径选择流程
+5. 从 host local PV 切换到 NAS/NFS/MinIO CSI
+6. Portal 再封装表单：模型、数据、输出目录、训练方式、LoRA 参数、vGPU 参数
+```
+
+最终目标是算法同学在 ClearML 或 Portal 页面里只改参数，不需要登录机器手写 YAML。
