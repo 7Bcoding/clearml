@@ -14,4 +14,4 @@
 agentk8sglue:
   basePodTemplate:
     nodeSelector:
-      kubernetes.io/hostname: <GPU_NODE_HOSTNAME>
+      kubernetes.io/hostname: gpu-server-6
