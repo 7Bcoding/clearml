@@ -252,44 +252,159 @@ model 权重文件
 
 ### 4.3 准备冒烟数据
 
-建议准备一个极小 SFT JSONL 文件：
+如果现在完全没有微调数据，冒烟阶段不要先卡在数据集建设上。建议按下面优先级准备数据：
+
+```text
+优先级 1：手工造 2-10 条最小 Alpaca 数据，用来验证链路
+优先级 2：使用 LLaMA-Factory 自带 demo 数据
+优先级 3：从 Hugging Face / ModelScope 下载公开 SFT 数据
+优先级 4：接入公司内部真实业务数据，先脱敏、清洗、抽样
+```
+
+本次冒烟最推荐用优先级 1。它不验证模型效果，只验证 ClearML、K8s、Volcano、HAMi、镜像、挂载、日志和产物链路是否打通。
+
+#### 4.3.1 方式 A：手工创建最小 SFT 数据
+
+在目标 GPU 节点上执行：
+
+```bash
+mkdir -p /data/ai-local/datasets/demo_sft
+
+cat > /data/ai-local/datasets/demo_sft/train.jsonl <<'EOF'
+{"instruction":"你是谁？","input":"","output":"我是一个用于冒烟测试的助手。"}
+{"instruction":"请把下面的话改写得更正式。","input":"今天活儿挺多。","output":"今天的工作任务较为繁重。"}
+{"instruction":"把下面中文翻译成英文。","input":"模型微调任务已经提交成功。","output":"The model fine-tuning task has been submitted successfully."}
+{"instruction":"请总结下面这句话。","input":"ClearML 负责实验追踪和任务提交，Kubernetes 负责资源调度，Volcano 和 HAMi 负责 vGPU 调度。","output":"该平台使用 ClearML 管理训练任务，并通过 Kubernetes、Volcano 和 HAMi 调度 GPU 资源。"}
+EOF
+```
+
+Host 路径：
 
 ```text
 /data/ai-local/datasets/demo_sft/train.jsonl
 ```
 
-Pod 内对应：
+Pod 内路径：
 
 ```text
 /data/datasets/demo_sft/train.jsonl
 ```
 
-LLaMA-Factory 的 Alpaca 格式示例：
+后面提交训练任务时使用：
 
-```jsonl
-{"instruction":"你是谁？","input":"","output":"我是一个用于冒烟测试的助手。"}
-{"instruction":"请把下面的话改写得更正式。","input":"今天活儿挺多。","output":"今天的工作任务较为繁重。"}
+```text
+--dataset-path /data/datasets/demo_sft/train.jsonl
+--dataset-format alpaca
 ```
 
 检查：
 
 ```bash
 ls -lah /data/ai-local/datasets/demo_sft
-head -n 2 /data/ai-local/datasets/demo_sft/train.jsonl
+head -n 4 /data/ai-local/datasets/demo_sft/train.jsonl
 ```
 
-如果你要直接使用算法同学已有数据，例如 ToolACE：
+#### 4.3.2 方式 B：使用 LLaMA-Factory 自带 demo 数据
+
+你的本地仓库 `D:\Python\LlamaFactory\data` 里已经有示例数据，可以直接拿来做冒烟：
 
 ```text
-Host 路径：/data/ai-local/datasets/ToolACE/data.json
-Pod 路径： /data/datasets/ToolACE/data.json
+alpaca_zh_demo.json       中文 Alpaca SFT 示例
+alpaca_en_demo.json       英文 Alpaca SFT 示例
+identity.json             身份认知类 SFT 示例
+v1_sft_demo.jsonl         v1 版本 SFT 示例
 ```
 
-后面命令里的参数改成：
+如果 GPU 节点可以访问外网，可以在 GPU 节点上拉取 LLaMA-Factory 仓库并复制 demo 数据：
+
+```bash
+git clone https://github.com/hiyouga/LLaMA-Factory.git /tmp/LLaMA-Factory
+mkdir -p /data/ai-local/datasets/llamafactory_demo
+cp /tmp/LLaMA-Factory/data/alpaca_zh_demo.json \
+  /data/ai-local/datasets/llamafactory_demo/alpaca_zh_demo.json
+```
+
+如果 GPU 节点不能访问外网，可以从开发机上传。Windows PowerShell 示例：
+
+```powershell
+ssh <gpu-node> "mkdir -p /data/ai-local/datasets/llamafactory_demo"
+```
+
+```powershell
+scp D:\Python\LlamaFactory\data\alpaca_zh_demo.json `
+  <gpu-node>:/data/ai-local/datasets/llamafactory_demo/alpaca_zh_demo.json
+```
+
+后面提交训练任务时使用：
 
 ```text
---dataset-path /data/datasets/ToolACE/data.json
+--dataset-path /data/datasets/llamafactory_demo/alpaca_zh_demo.json
+--dataset-format alpaca
 ```
+
+注意：当前通用模板在传入 `--dataset-path` 时，会自动为 LLaMA-Factory 生成临时 `dataset_info.json`，所以冒烟阶段不需要你手工维护 LLaMA-Factory 的 `dataset_info.json`。
+
+#### 4.3.3 方式 C：下载公开 SFT 数据
+
+如果你希望更接近真实微调，可以从公开数据集下载小样本。常见来源：
+
+```text
+Hugging Face Datasets
+ModelScope Datasets
+LLaMA-Factory 官方 dataset_info.json 中登记的数据集
+```
+
+建议第一次只抽 100-1000 条，不要直接下载大数据集。示例流程：
+
+```text
+1. 下载公开数据集
+2. 抽样 100-1000 条
+3. 转换成 Alpaca 或 ShareGPT 格式
+4. 放到 /data/ai-local/datasets/<dataset_name>/train.jsonl
+5. Pod 内通过 /data/datasets/<dataset_name>/train.jsonl 访问
+```
+
+Alpaca 格式最简单：
+
+```json
+{
+  "instruction": "用户指令，必填",
+  "input": "用户输入，可为空",
+  "output": "模型应该学习的回答，必填"
+}
+```
+
+JSONL 文件每行一个样本：
+
+```jsonl
+{"instruction":"解释什么是 LoRA。","input":"","output":"LoRA 是一种参数高效微调方法，通过训练低秩矩阵来减少显存和参数更新量。"}
+{"instruction":"把下面的话总结成一句。","input":"我们使用 ClearML 提交任务，并由 Volcano 调度到 GPU 节点运行。","output":"该训练任务通过 ClearML 提交，并由 Volcano 调度到 GPU 节点执行。"}
+```
+
+#### 4.3.4 方式 D：使用内部真实业务数据
+
+正式微调时，数据通常来自：
+
+```text
+业务问答知识库
+客服/运维/售后对话，需脱敏
+人工标注平台导出的指令数据
+专家整理的标准问答
+历史 prompt 和优质回复
+RAG 问答日志中人工确认过的样本
+```
+
+正式数据进入训练前建议至少做这些处理：
+
+```text
+去除手机号、身份证、邮箱、客户名等敏感信息
+去除重复样本
+去除空回答、乱码、过短或过长样本
+统一成 Alpaca 或 ShareGPT 格式
+先抽样 100 条做冒烟，再扩大到完整数据
+```
+
+本次冒烟不要求真实业务数据。先用方式 A 或方式 B 跑通链路即可。
 
 ---
 

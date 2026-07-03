@@ -45,7 +45,7 @@ agentk8sglue:
 
   # Default image for tasks that do not set task.set_base_docker(...).
   # Prefer an image with CUDA + PyTorch + LLaMA-Factory preinstalled.
-  defaultContainerImage: harbor.example.com/ai/llamafactory:latest
+  defaultContainerImage: hiyouga/llamafactory:latest
 
   # The custom vGPU hook reads ClearML CONFIGURATION -> VGPU and injects
   # volcano.sh/vgpu-* limits into the generated training Pod.
