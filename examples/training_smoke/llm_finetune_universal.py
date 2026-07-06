@@ -79,6 +79,7 @@ STRING_FIELDS = {
     "extra_backend_config_json",
     "extra_args",
     "custom_command",
+    "cuda_visible_devices",
 }
 
 INT_FIELDS = {
@@ -100,6 +101,7 @@ INT_FIELDS = {
     "vgpu_number",
     "vgpu_memory",
     "vgpu_cores",
+    "nproc_per_node",
 }
 
 FLOAT_FIELDS = {
@@ -118,6 +120,7 @@ BOOL_FIELDS = {
     "dataset_openai_messages",
     "ranking",
     "upload_output_dir",
+    "force_torchrun",
 }
 
 
@@ -433,6 +436,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--extra-args", default="")
     parser.add_argument("--custom-command", default="")
     parser.add_argument("--upload-output-dir", action="store_true")
+    parser.add_argument(
+        "--cuda-visible-devices",
+        default="0",
+        help="Restrict visible GPUs for smoke tests. Use empty string to keep the container default.",
+    )
+    parser.add_argument(
+        "--nproc-per-node",
+        type=str_to_int,
+        default=1,
+        help="LLaMA-Factory torchrun process count. Keep 1 for single-card smoke tests.",
+    )
+    parser.add_argument(
+        "--force-torchrun",
+        type=str_to_bool,
+        default=False,
+        help="Set FORCE_TORCHRUN=1 for explicit distributed training. Keep false for smoke tests.",
+    )
 
     parser.add_argument("--vgpu-number", type=str_to_int, default=1)
     parser.add_argument("--vgpu-memory", type=str_to_int, default=24)
@@ -481,6 +501,13 @@ def main() -> None:
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     os.environ.setdefault("HF_HOME", "/data/cache/huggingface")
     os.environ.setdefault("MODELSCOPE_CACHE", "/data/cache/modelscope")
+    os.environ["NPROC_PER_NODE"] = str(args.nproc_per_node)
+    if args.cuda_visible_devices:
+        os.environ["CUDA_VISIBLE_DEVICES"] = args.cuda_visible_devices
+    if args.force_torchrun:
+        os.environ["FORCE_TORCHRUN"] = "1"
+    else:
+        os.environ.pop("FORCE_TORCHRUN", None)
 
     output_dir = Path(args.output_dir)
     work_dir = output_dir / "_clearml_template"
@@ -520,6 +547,8 @@ def main() -> None:
     print("[llm-finetune] model_path:", args.model_path)
     print("[llm-finetune] dataset_path:", args.dataset_path)
     print("[llm-finetune] output_dir:", args.output_dir)
+    print("[llm-finetune] CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
+    print("[llm-finetune] NPROC_PER_NODE:", os.environ.get("NPROC_PER_NODE", ""))
     print("[llm-finetune] running:")
     print(" ".join(shlex.quote(item) for item in command))
     subprocess.run(command, check=True)

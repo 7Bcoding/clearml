@@ -704,6 +704,9 @@ python examples/training_smoke/llm_finetune_universal.py \
   --lora-rank 8 \
   --lora-alpha 16 \
   --lora-target all \
+  --cuda-visible-devices 0 \
+  --nproc-per-node 1 \
+  --force-torchrun false \
   --vgpu-number 1 \
   --vgpu-memory 24 \
   --vgpu-cores 100
@@ -723,6 +726,9 @@ python examples/training_smoke/llm_finetune_universal.py \
 --dataset-format alpaca                         数据按 Alpaca 格式解释
 --finetuning-type lora                          使用 LoRA 微调
 --max-steps 2                                   只跑 2 step，用于冒烟
+--cuda-visible-devices 0                        只让训练进程看到 1 张 GPU，避免自动 DDP
+--nproc-per-node 1                              LLaMA-Factory torchrun 进程数固定为 1
+--force-torchrun false                          冒烟阶段不要强制分布式训练
 --vgpu-number / --vgpu-memory / --vgpu-cores    注入 volcano.sh/vgpu-* 资源
 ```
 
@@ -1260,6 +1266,58 @@ backend = llama-factory
 1. 使用最新的 llm_finetune_universal.py 重新提交新 Task
 2. 不要继续 Enqueue 旧 Task
 3. 如果在 WebUI 里手动改参数，把列表形式改成普通字符串
+```
+
+### 15.12 NCCL 日志和多进程 DDP
+
+现象示例：
+
+```text
+NCCL INFO NET/Plugin: No plugin found (libnccl-net.so)
+NCCL INFO NET/Plugin: Using internal network plugin.
+```
+
+这两行通常不是致命错误。它表示 NCCL 找不到外部网络插件，会 fallback 到 internal network plugin。
+
+真正需要关注的是日志里是否出现多个 rank，例如：
+
+```text
+[0] NCCL INFO
+[1] NCCL INFO
+[2] NCCL INFO
+[3] NCCL INFO
+```
+
+如果本次只是单卡冒烟，却出现 4 个 rank，说明 LLaMA-Factory 在容器里看到了多张 GPU，于是自动启动了多进程 DDP。冒烟阶段建议强制单卡：
+
+```text
+--cuda-visible-devices 0
+--nproc-per-node 1
+--force-torchrun false
+```
+
+当前模板默认就是这个策略。重新提交新任务后，日志里应能看到：
+
+```text
+[llm-finetune] CUDA_VISIBLE_DEVICES: 0
+[llm-finetune] NPROC_PER_NODE: 1
+```
+
+如果仍然出现 4 个 rank，检查 ClearML WebUI 的 `CONFIGURATION -> Args`，确认：
+
+```text
+cuda_visible_devices = 0
+nproc_per_node = 1
+force_torchrun = false
+```
+
+如果后续要做真正多卡训练，再把这些参数改成：
+
+```text
+--cuda-visible-devices 0,1,2,3
+--nproc-per-node 4
+--force-torchrun true
+--vgpu-number 4
 ```
 
 ---
