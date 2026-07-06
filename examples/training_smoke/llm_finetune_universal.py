@@ -165,18 +165,6 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
-def safe_symlink(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists() or dst.is_symlink():
-        return
-    try:
-        os.symlink(src, dst, target_is_directory=src.is_dir())
-    except OSError:
-        # Fallback: use the source path directly in dataset_info.json. This is
-        # accepted in many setups, but symlinking is preferred for portability.
-        pass
-
-
 def build_dataset_info(args: argparse.Namespace, work_dir: Path) -> tuple[str, str]:
     """Return (dataset_name, dataset_dir) for LLaMA-Factory."""
     if not args.dataset_path:
@@ -185,14 +173,18 @@ def build_dataset_info(args: argparse.Namespace, work_dir: Path) -> tuple[str, s
         return args.dataset, args.dataset_dir
 
     dataset_path = Path(args.dataset_path)
+    if not dataset_path.exists():
+        raise FileNotFoundError(
+            f"Dataset file not found in training container: {dataset_path}. "
+            "Remember --dataset-path must be a Pod path, for example /data/datasets/demo_sft/train.jsonl."
+        )
+
     dataset_name = args.dataset_name or "clearml_dataset"
     dataset_dir = work_dir / "llamafactory_dataset"
-    linked_path = dataset_dir / dataset_path.name
-    safe_symlink(dataset_path, linked_path)
-
-    file_name = linked_path.name if linked_path.exists() or linked_path.is_symlink() else str(dataset_path)
     entry: dict[str, Any] = {
-        "file_name": file_name,
+        # Use the absolute Pod path directly. This avoids symlink issues when
+        # /data/output and /data/datasets are mounted differently.
+        "file_name": str(dataset_path),
         "formatting": args.dataset_format,
     }
 
@@ -546,6 +538,8 @@ def main() -> None:
     print("[llm-finetune] backend:", args.backend)
     print("[llm-finetune] model_path:", args.model_path)
     print("[llm-finetune] dataset_path:", args.dataset_path)
+    if args.dataset_path:
+        print("[llm-finetune] dataset_path_exists:", Path(args.dataset_path).exists())
     print("[llm-finetune] output_dir:", args.output_dir)
     print("[llm-finetune] CUDA_VISIBLE_DEVICES:", os.environ.get("CUDA_VISIBLE_DEVICES", ""))
     print("[llm-finetune] NPROC_PER_NODE:", os.environ.get("NPROC_PER_NODE", ""))

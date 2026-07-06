@@ -1320,6 +1320,56 @@ force_torchrun = false
 --vgpu-number 4
 ```
 
+### 15.13 LLaMA-Factory 找不到 train.jsonl
+
+现象示例：
+
+```text
+ValueError: File /data/output/llamafactory-sft-lora-smoke/_clearml_template/llamafactory_dataset/train.jsonl not found.
+```
+
+这说明 LLaMA-Factory 没有读到真正的数据文件。正常情况下，本次冒烟的数据应该在：
+
+```text
+/data/datasets/demo_sft/train.jsonl
+```
+
+先进入目标 GPU 节点确认 host local PV 上有数据：
+
+```bash
+ls -lah /data/ai-local/datasets/demo_sft/train.jsonl
+head -n 4 /data/ai-local/datasets/demo_sft/train.jsonl
+```
+
+Pod 内路径应该是：
+
+```text
+/data/datasets/demo_sft/train.jsonl
+```
+
+如果日志里还看到 LLaMA-Factory 去下面路径找数据：
+
+```text
+/data/output/.../_clearml_template/llamafactory_dataset/train.jsonl
+```
+
+说明你还在跑旧脚本或旧 Task。最新模板已经改成在 `dataset_info.json` 里直接写绝对 Pod 数据路径，不再依赖 symlink。
+
+请重新提交新 Task，并确认日志里出现：
+
+```text
+[llm-finetune] dataset_path: /data/datasets/demo_sft/train.jsonl
+[llm-finetune] dataset_path_exists: True
+```
+
+如果是：
+
+```text
+[llm-finetune] dataset_path_exists: False
+```
+
+说明 `/data` 挂载或数据准备有问题，回到第 4.3 步重新创建数据，或检查 Agent Pod Template 的 `/data` PVC 挂载。
+
 ---
 
 ## 16. 本次冒烟后的下一步
