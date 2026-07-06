@@ -684,7 +684,7 @@ volcano.sh/vgpu-cores
 python examples/training_smoke/llm_finetune_universal.py \
   --backend llama-factory \
   --queue llm-finetune-vgpu \
-  --docker-image harbor.example.com/ai/llamafactory:latest \
+  --docker-image hiyouga/llamafactory:latest \
   --clearml-project training-template/llm \
   --clearml-task-name llama-factory-sft-lora-smoke \
   --reuse-last-task-id false \
