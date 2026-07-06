@@ -34,12 +34,112 @@ def str_to_bool(value: str) -> bool:
     return str(value).lower() in {"1", "true", "yes", "y", "on"}
 
 
+def str_to_scalar(value: Any) -> str:
+    return str(unwrap_clearml_scalar(value))
+
+
 def str_to_int(value: Any) -> int:
     return int(unwrap_clearml_scalar(value))
 
 
 def str_to_float(value: Any) -> float:
     return float(unwrap_clearml_scalar(value))
+
+
+STRING_FIELDS = {
+    "queue",
+    "docker_image",
+    "clearml_project",
+    "clearml_task_name",
+    "backend",
+    "model_path",
+    "dataset",
+    "dataset_dir",
+    "dataset_path",
+    "dataset_name",
+    "output_dir",
+    "run_name",
+    "train_method",
+    "finetuning_type",
+    "template",
+    "dtype",
+    "lr_scheduler_type",
+    "report_to",
+    "lora_target",
+    "dataset_format",
+    "prompt_column",
+    "query_column",
+    "response_column",
+    "history_column",
+    "messages_column",
+    "system_column",
+    "tools_column",
+    "chosen_column",
+    "rejected_column",
+    "extra_backend_config_json",
+    "extra_args",
+    "custom_command",
+}
+
+INT_FIELDS = {
+    "max_steps",
+    "max_samples",
+    "per_device_train_batch_size",
+    "per_device_eval_batch_size",
+    "gradient_accumulation_steps",
+    "max_length",
+    "cutoff_len",
+    "save_steps",
+    "eval_steps",
+    "logging_steps",
+    "save_total_limit",
+    "preprocessing_num_workers",
+    "lora_rank",
+    "lora_alpha",
+    "quantization_bit",
+    "vgpu_number",
+    "vgpu_memory",
+    "vgpu_cores",
+}
+
+FLOAT_FIELDS = {
+    "num_train_epochs",
+    "learning_rate",
+    "warmup_ratio",
+    "val_size",
+    "lora_dropout",
+}
+
+BOOL_FIELDS = {
+    "reuse_last_task_id",
+    "store_standalone_script",
+    "overwrite_output_dir",
+    "gradient_checkpointing",
+    "dataset_openai_messages",
+    "ranking",
+    "upload_output_dir",
+}
+
+
+def normalize_args(args: argparse.Namespace) -> argparse.Namespace:
+    """Normalize ClearML duplicated scalar parameters before using them."""
+    for name in STRING_FIELDS:
+        if hasattr(args, name):
+            setattr(args, name, str_to_scalar(getattr(args, name)))
+    for name in INT_FIELDS:
+        if hasattr(args, name):
+            value = getattr(args, name)
+            if value is not None:
+                setattr(args, name, str_to_int(value))
+    for name in FLOAT_FIELDS:
+        if hasattr(args, name):
+            value = getattr(args, name)
+            if value is not None:
+                setattr(args, name, str_to_float(value))
+    for name in BOOL_FIELDS:
+        if hasattr(args, name):
+            setattr(args, name, str_to_bool(getattr(args, name)))
+    return args
 
 
 def add_arg(command: list[str], flag: str, value: Any) -> None:
@@ -243,7 +343,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--docker-image", default="harbor.example.com/ai/llamafactory:latest")
     parser.add_argument("--clearml-project", default="training-template/llm")
     parser.add_argument("--clearml-task-name", default="llm-finetune-universal")
-    parser.add_argument("--backend", choices=["llama-factory", "ms-swift", "custom"], default="llama-factory")
+    parser.add_argument(
+        "--backend",
+        type=str_to_scalar,
+        choices=["llama-factory", "ms-swift", "custom"],
+        default="llama-factory",
+    )
     parser.add_argument(
         "--reuse-last-task-id",
         type=str_to_bool,
@@ -266,9 +371,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-name", default="llm-finetune-universal")
 
     parser.add_argument("--train-method", default="sft")
-    parser.add_argument("--finetuning-type", choices=["lora", "qlora", "full", "freeze"], default="lora")
+    parser.add_argument(
+        "--finetuning-type",
+        type=str_to_scalar,
+        choices=["lora", "qlora", "full", "freeze"],
+        default="lora",
+    )
     parser.add_argument("--template", default="qwen")
-    parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
+    parser.add_argument(
+        "--dtype",
+        type=str_to_scalar,
+        choices=["bfloat16", "float16", "float32"],
+        default="bfloat16",
+    )
     parser.add_argument("--max-steps", type=str_to_int, default=2)
     parser.add_argument("--num-train-epochs", type=str_to_float, default=1.0)
     parser.add_argument("--max-samples", type=str_to_int, default=0)
@@ -296,7 +411,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--lora-target", default="all")
     parser.add_argument("--quantization-bit", type=str_to_int, default=4)
 
-    parser.add_argument("--dataset-format", choices=["alpaca", "sharegpt"], default="alpaca")
+    parser.add_argument(
+        "--dataset-format",
+        type=str_to_scalar,
+        choices=["alpaca", "sharegpt"],
+        default="alpaca",
+    )
     parser.add_argument("--dataset-openai-messages", action="store_true")
     parser.add_argument("--ranking", action="store_true")
     parser.add_argument("--prompt-column", default="instruction")
@@ -341,7 +461,7 @@ def main() -> None:
         task_name=pre_args.clearml_task_name,
         reuse_last_task_id=pre_args.reuse_last_task_id,
     )
-    args = parser.parse_args()
+    args = normalize_args(parser.parse_args())
     if args.cutoff_len is not None:
         args.max_length = args.cutoff_len
 
@@ -397,6 +517,9 @@ def main() -> None:
     task.upload_artifact("llm-finetune-manifest", artifact_object=str(manifest_path))
 
     print("[llm-finetune] backend:", args.backend)
+    print("[llm-finetune] model_path:", args.model_path)
+    print("[llm-finetune] dataset_path:", args.dataset_path)
+    print("[llm-finetune] output_dir:", args.output_dir)
     print("[llm-finetune] running:")
     print(" ".join(shlex.quote(item) for item in command))
     subprocess.run(command, check=True)

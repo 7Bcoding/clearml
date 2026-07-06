@@ -1227,6 +1227,41 @@ max_steps = 2
 --learning-rate "[1e-5, 1e-5]"       -> 1e-5
 ```
 
+### 15.11 backend 被解析成 `['llama-factory', 'llama-factory']`
+
+现象示例：
+
+```text
+[llm-finetune] backend: ['llama-factory', 'llama-factory']
+[llm-finetune] running:
+bash -lc '['"'"''"'"', '"'"''"'"']'
+bash: line 1: [,: command not found
+```
+
+这说明 ClearML 把字符串参数也保存成了列表形式，导致脚本没有识别出：
+
+```text
+backend = llama-factory
+```
+
+而是误判为 custom backend，最后执行了空的 `custom_command`。
+
+当前模板已经兼容这类参数形式。下面这些值会自动恢复成普通标量：
+
+```text
+--backend "['llama-factory', 'llama-factory']"      -> llama-factory
+--custom-command "['', '']"                         -> 空字符串
+--dataset-path "['/data/a.jsonl', '/data/a.jsonl']" -> /data/a.jsonl
+```
+
+处理方式：
+
+```text
+1. 使用最新的 llm_finetune_universal.py 重新提交新 Task
+2. 不要继续 Enqueue 旧 Task
+3. 如果在 WebUI 里手动改参数，把列表形式改成普通字符串
+```
+
 ---
 
 ## 16. 本次冒烟后的下一步
