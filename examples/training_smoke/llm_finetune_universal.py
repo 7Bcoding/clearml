@@ -215,6 +215,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clearml-project", default="training-template/llm")
     parser.add_argument("--clearml-task-name", default="llm-finetune-universal")
     parser.add_argument("--backend", choices=["llama-factory", "ms-swift", "custom"], default="llama-factory")
+    parser.add_argument(
+        "--store-standalone-script",
+        type=str_to_bool,
+        default=True,
+        help="Store this script in the ClearML Task so the remote Agent does not need to clone a Git repository.",
+    )
 
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--dataset", default="")
@@ -281,10 +287,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     reqs = Path(__file__).with_name("requirements-smoke.txt")
-    Task.force_requirements_env_freeze(force=True, requirements_file=str(reqs))
+    if reqs.exists():
+        Task.force_requirements_env_freeze(force=True, requirements_file=str(reqs))
+    else:
+        Task.force_requirements_env_freeze(force=True)
 
     parser = build_parser()
     pre_args, _ = parser.parse_known_args()
+    if pre_args.store_standalone_script:
+        if not hasattr(Task, "force_store_standalone_script"):
+            raise RuntimeError(
+                "This ClearML SDK does not support Task.force_store_standalone_script. "
+                "Please upgrade clearml, or use an internal Git repository reachable by training Pods."
+            )
+        Task.force_store_standalone_script(True)
     task = Task.init(project_name=pre_args.clearml_project, task_name=pre_args.clearml_task_name)
     args = parser.parse_args()
     if args.cutoff_len is not None:

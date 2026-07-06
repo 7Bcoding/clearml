@@ -687,6 +687,7 @@ python examples/training_smoke/llm_finetune_universal.py \
   --docker-image harbor.example.com/ai/llamafactory:latest \
   --clearml-project training-template/llm \
   --clearml-task-name llama-factory-sft-lora-smoke \
+  --store-standalone-script true \
   --model-path /data/models/Qwen2.5-0.5B-Instruct \
   --dataset-path /data/datasets/demo_sft/train.jsonl \
   --dataset-format alpaca \
@@ -713,6 +714,7 @@ python examples/training_smoke/llm_finetune_universal.py \
 --backend llama-factory                         使用 LLaMA-Factory 后端
 --queue llm-finetune-vgpu                       投递到 LLM 微调队列
 --docker-image                                  训练 Pod 使用的镜像
+--store-standalone-script true                  把当前脚本存入 ClearML Task，避免训练 Pod clone 远端 Git 仓库
 --model-path /data/models/...                   Pod 内模型路径
 --dataset-path /data/datasets/...               Pod 内数据路径
 --output-dir /data/output/...                   Pod 内输出路径
@@ -723,6 +725,10 @@ python examples/training_smoke/llm_finetune_universal.py \
 ```
 
 提交成功后，本地命令通常会很快结束，真正训练会由 ClearML Agent 在 K8s 中拉起 Pod。
+
+当前通用模板默认启用 `--store-standalone-script true`，适合冒烟和单文件模板。这样 ClearML 会把当前脚本内容存到 Task 里，训练 Pod 不需要访问 GitHub 克隆代码仓库。
+
+注意：standalone script 模式适合当前这种单文件模板。如果后续模板拆成多个 Python 文件、依赖本地模块或大量配置文件，建议改为内网 Git 仓库、内部 Python 包或把模板代码打进训练镜像。
 
 ---
 
@@ -1033,6 +1039,138 @@ ShareGPT 格式是否包含 conversations
 ```
 
 或者换更小模型。
+
+### 15.9 Git 仓库克隆失败
+
+现象示例：
+
+```text
+error: RPC failed; curl 92 HTTP/2 stream 0 was not closed cleanly: CANCEL
+fatal: early EOF
+fatal: fetch-pack: invalid index-pack output
+clearml_agent: ERROR: Failed cloning repository.
+```
+
+这类错误发生在训练真正启动之前。ClearML Agent 会先在训练容器里克隆任务记录的代码仓库，例如：
+
+```text
+repository = https://github.com/7Bcoding/clearml.git
+entry_point = examples/training_smoke/llm_finetune_universal.py
+```
+
+如果训练 Pod 访问 GitHub 不稳定、被代理中断、没有外网权限，任务就会在 clone 阶段失败。
+
+本 Runbook 的通用模板已经默认启用 standalone script 模式：
+
+```text
+--store-standalone-script true
+```
+
+正常情况下，重新提交新任务后，训练 Pod 不应该再依赖 GitHub clone 这个模板脚本。注意不要直接复跑旧任务，因为旧任务已经记录了 GitHub 仓库地址。请在提交机上重新执行第 10 步命令，生成一个新的 ClearML Task。
+
+重新提交后，在 ClearML WebUI 检查：
+
+```text
+SCRIPT -> Repository 不应再是 https://github.com/7Bcoding/clearml.git
+```
+
+如果新任务仍然记录 GitHub 仓库，检查提交命令是否带了：
+
+```text
+--store-standalone-script true
+```
+
+以及提交机上的 ClearML SDK 是否支持：
+
+```text
+Task.force_store_standalone_script
+```
+
+如果 SDK 太老，请升级提交机上的 `clearml` 包，或者改用内网 Git 仓库。
+
+如果你明确关闭了 standalone 模式，或者后续模板变成多文件项目，需要继续走 Git 方式，则先确认训练镜像里能否 clone 仓库。可以在 GPU 节点上执行：
+
+```bash
+docker run --rm hiyouga/llamafactory:latest \
+  bash -lc "git --version && git clone https://github.com/7Bcoding/clearml.git /tmp/clearml-test"
+```
+
+如果这里也失败，说明不是 ClearML 参数问题，而是训练环境访问 GitHub 的问题。
+
+Git 处理方式 A：让 Git 使用 HTTP/1.1。  
+当前 `clearml-agent-llm-finetune-vgpu-values.yaml` 已经在训练 Pod 环境变量里加入：
+
+```yaml
+- name: GIT_CONFIG_COUNT
+  value: "1"
+- name: GIT_CONFIG_KEY_0
+  value: http.version
+- name: GIT_CONFIG_VALUE_0
+  value: HTTP/1.1
+- name: GIT_TERMINAL_PROMPT
+  value: "0"
+```
+
+修改 values 后需要重新升级 Agent：
+
+```bash
+helm upgrade --install clearml-agent-llm-finetune \
+  clearml/clearml-agent \
+  -n clearml \
+  -f examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-values.yaml \
+  -f examples/training_smoke/k8s/clearml-agent-llm-finetune-vgpu-localpv-overlay.local.yaml
+```
+
+然后重新 Enqueue 任务。
+
+Git 处理方式 B：清理失败的 VCS 缓存后重试。  
+如果上一次 clone 中断，`/root/.clearml/vcs-cache` 里可能留下损坏缓存。当前 Agent values 把 `/root/.clearml` 挂到了节点本地：
+
+```text
+/data/clearml-cache/llm-finetune-vgpu/clearml
+```
+
+可以在目标 GPU 节点上清理本任务相关缓存：
+
+```bash
+rm -rf /data/clearml-cache/llm-finetune-vgpu/clearml/vcs-cache/clearml.git.*
+```
+
+然后重新 Enqueue 任务。
+
+Git 处理方式 C：使用内网 Git 镜像。  
+生产环境不建议让训练 Pod 依赖公网 GitHub。建议把平台模板代码同步到公司内网 Git，例如：
+
+```text
+https://gitlab.example.com/mlops/clearml.git
+```
+
+然后提交任务时让 ClearML 记录内网仓库地址。最简单做法是在提交机本地把 Git remote 改成内网地址后重新提交任务：
+
+```bash
+git remote set-url origin https://gitlab.example.com/mlops/clearml.git
+git push origin master
+```
+
+重新执行冒烟提交命令后，在 ClearML WebUI 的任务详情里确认：
+
+```text
+SCRIPT -> Repository = https://gitlab.example.com/mlops/clearml.git
+```
+
+这样训练 Pod 只需要访问内网 Git，稳定性会高很多。
+
+长期处理方式 D：把通用模板固化为平台镜像或内部包。  
+等冒烟稳定后，可以把 `llm_finetune_universal.py` 放进平台训练镜像或内部 Python 包，ClearML 任务只传参数。这更适合正式 Portal 化，也不需要训练 Pod 访问公网 GitHub。
+
+另外，日志里的下面内容不是本次失败的根因：
+
+```text
+Python executable with version '3.12' requested by the Task, not found...
+using '/opt/conda/bin/python3' (v3.11.11) instead
+```
+
+这是 Python 版本回退警告。当前失败的直接原因是 Git clone 失败。
 
 ---
 

@@ -95,6 +95,19 @@ agentk8sglue:
       - name: PIP_CACHE_DIR
         value: /data/cache/pip
 
+      # ClearML clones the task repository inside the training container before
+      # running the entry point. Some corporate gateways/proxies make GitHub
+      # HTTP/2 clone unstable, causing curl 92 / early EOF errors. Force Git to
+      # use HTTP/1.1 for this Pod.
+      - name: GIT_CONFIG_COUNT
+        value: "1"
+      - name: GIT_CONFIG_KEY_0
+        value: http.version
+      - name: GIT_CONFIG_VALUE_0
+        value: HTTP/1.1
+      - name: GIT_TERMINAL_PROMPT
+        value: "0"
+
       # Common LLM training envs.
       - name: PYTORCH_CUDA_ALLOC_CONF
         value: expandable_segments:True
