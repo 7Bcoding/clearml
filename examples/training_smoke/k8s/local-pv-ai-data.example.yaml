@@ -32,7 +32,7 @@ metadata:
   name: local-ai-data-pv-gpu-node
 spec:
   capacity:
-    storage: 2Ti
+    storage: 800Gi
   volumeMode: Filesystem
   accessModes:
     - ReadWriteOnce
@@ -60,5 +60,5 @@ spec:
   storageClassName: local-ai-data
   resources:
     requests:
-      storage: 2Ti
+      storage: 50Gi
 

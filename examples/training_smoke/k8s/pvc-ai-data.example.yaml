@@ -13,6 +13,6 @@ spec:
     - ReadWriteMany
   resources:
     requests:
-      storage: 50Ti
+      storage: 800Gi
   storageClassName: nfs-client
 
