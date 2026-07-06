@@ -1,4 +1,5 @@
 import argparse
+import ast
 import json
 import os
 import shlex
@@ -9,8 +10,36 @@ from typing import Any
 from clearml import Task
 
 
+def unwrap_clearml_scalar(value: Any) -> Any:
+    """ClearML cloned tasks can occasionally pass scalar params as [x, x]."""
+    if isinstance(value, (list, tuple)):
+        return value[-1] if value else ""
+
+    if not isinstance(value, str):
+        return value
+
+    text = value.strip()
+    if text.startswith("[") and text.endswith("]"):
+        try:
+            parsed = ast.literal_eval(text)
+        except (SyntaxError, ValueError):
+            return value
+        if isinstance(parsed, (list, tuple)):
+            return parsed[-1] if parsed else ""
+    return value
+
+
 def str_to_bool(value: str) -> bool:
+    value = unwrap_clearml_scalar(value)
     return str(value).lower() in {"1", "true", "yes", "y", "on"}
+
+
+def str_to_int(value: Any) -> int:
+    return int(unwrap_clearml_scalar(value))
+
+
+def str_to_float(value: Any) -> float:
+    return float(unwrap_clearml_scalar(value))
 
 
 def add_arg(command: list[str], flag: str, value: Any) -> None:
@@ -126,9 +155,9 @@ def llama_factory_config(args: argparse.Namespace, work_dir: Path) -> tuple[Path
         "plot_loss": True,
         "per_device_train_batch_size": args.per_device_train_batch_size,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
-        "learning_rate": float(args.learning_rate),
+        "learning_rate": args.learning_rate,
         "lr_scheduler_type": args.lr_scheduler_type,
-        "warmup_ratio": float(args.warmup_ratio),
+        "warmup_ratio": args.warmup_ratio,
         "report_to": args.report_to,
     }
 
@@ -216,6 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--clearml-task-name", default="llm-finetune-universal")
     parser.add_argument("--backend", choices=["llama-factory", "ms-swift", "custom"], default="llama-factory")
     parser.add_argument(
+        "--reuse-last-task-id",
+        type=str_to_bool,
+        default=False,
+        help="Reuse ClearML's last local Task id. Keep false for smoke tests to avoid old Git metadata.",
+    )
+    parser.add_argument(
         "--store-standalone-script",
         type=str_to_bool,
         default=True,
@@ -234,32 +269,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--finetuning-type", choices=["lora", "qlora", "full", "freeze"], default="lora")
     parser.add_argument("--template", default="qwen")
     parser.add_argument("--dtype", choices=["bfloat16", "float16", "float32"], default="bfloat16")
-    parser.add_argument("--max-steps", type=int, default=2)
-    parser.add_argument("--num-train-epochs", type=float, default=1.0)
-    parser.add_argument("--max-samples", type=int, default=0)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=1)
-    parser.add_argument("--per-device-eval-batch-size", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--learning-rate", default="1e-5")
-    parser.add_argument("--max-length", type=int, default=512)
-    parser.add_argument("--cutoff-len", type=int, default=None)
+    parser.add_argument("--max-steps", type=str_to_int, default=2)
+    parser.add_argument("--num-train-epochs", type=str_to_float, default=1.0)
+    parser.add_argument("--max-samples", type=str_to_int, default=0)
+    parser.add_argument("--per-device-train-batch-size", type=str_to_int, default=1)
+    parser.add_argument("--per-device-eval-batch-size", type=str_to_int, default=1)
+    parser.add_argument("--gradient-accumulation-steps", type=str_to_int, default=1)
+    parser.add_argument("--learning-rate", type=str_to_float, default=1e-5)
+    parser.add_argument("--max-length", type=str_to_int, default=512)
+    parser.add_argument("--cutoff-len", type=str_to_int, default=None)
     parser.add_argument("--lr-scheduler-type", default="cosine")
-    parser.add_argument("--warmup-ratio", default="0.05")
-    parser.add_argument("--val-size", default="0.01")
-    parser.add_argument("--save-steps", type=int, default=1)
-    parser.add_argument("--eval-steps", type=int, default=1)
-    parser.add_argument("--logging-steps", type=int, default=1)
-    parser.add_argument("--save-total-limit", type=int, default=1)
-    parser.add_argument("--preprocessing-num-workers", type=int, default=4)
+    parser.add_argument("--warmup-ratio", type=str_to_float, default=0.05)
+    parser.add_argument("--val-size", type=str_to_float, default=0.01)
+    parser.add_argument("--save-steps", type=str_to_int, default=1)
+    parser.add_argument("--eval-steps", type=str_to_int, default=1)
+    parser.add_argument("--logging-steps", type=str_to_int, default=1)
+    parser.add_argument("--save-total-limit", type=str_to_int, default=1)
+    parser.add_argument("--preprocessing-num-workers", type=str_to_int, default=4)
     parser.add_argument("--report-to", default="none")
     parser.add_argument("--overwrite-output-dir", type=str_to_bool, default=True)
     parser.add_argument("--gradient-checkpointing", type=str_to_bool, default=True)
 
-    parser.add_argument("--lora-rank", type=int, default=8)
-    parser.add_argument("--lora-alpha", type=int, default=16)
-    parser.add_argument("--lora-dropout", type=float, default=0.0)
+    parser.add_argument("--lora-rank", type=str_to_int, default=8)
+    parser.add_argument("--lora-alpha", type=str_to_int, default=16)
+    parser.add_argument("--lora-dropout", type=str_to_float, default=0.0)
     parser.add_argument("--lora-target", default="all")
-    parser.add_argument("--quantization-bit", type=int, default=4)
+    parser.add_argument("--quantization-bit", type=str_to_int, default=4)
 
     parser.add_argument("--dataset-format", choices=["alpaca", "sharegpt"], default="alpaca")
     parser.add_argument("--dataset-openai-messages", action="store_true")
@@ -279,9 +314,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--custom-command", default="")
     parser.add_argument("--upload-output-dir", action="store_true")
 
-    parser.add_argument("--vgpu-number", type=int, default=1)
-    parser.add_argument("--vgpu-memory", type=int, default=24)
-    parser.add_argument("--vgpu-cores", type=int, default=100)
+    parser.add_argument("--vgpu-number", type=str_to_int, default=1)
+    parser.add_argument("--vgpu-memory", type=str_to_int, default=24)
+    parser.add_argument("--vgpu-cores", type=str_to_int, default=100)
     return parser
 
 
@@ -301,7 +336,11 @@ def main() -> None:
                 "Please upgrade clearml, or use an internal Git repository reachable by training Pods."
             )
         Task.force_store_standalone_script(True)
-    task = Task.init(project_name=pre_args.clearml_project, task_name=pre_args.clearml_task_name)
+    task = Task.init(
+        project_name=pre_args.clearml_project,
+        task_name=pre_args.clearml_task_name,
+        reuse_last_task_id=pre_args.reuse_last_task_id,
+    )
     args = parser.parse_args()
     if args.cutoff_len is not None:
         args.max_length = args.cutoff_len

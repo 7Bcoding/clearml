@@ -687,6 +687,7 @@ python examples/training_smoke/llm_finetune_universal.py \
   --docker-image harbor.example.com/ai/llamafactory:latest \
   --clearml-project training-template/llm \
   --clearml-task-name llama-factory-sft-lora-smoke \
+  --reuse-last-task-id false \
   --store-standalone-script true \
   --model-path /data/models/Qwen2.5-0.5B-Instruct \
   --dataset-path /data/datasets/demo_sft/train.jsonl \
@@ -714,6 +715,7 @@ python examples/training_smoke/llm_finetune_universal.py \
 --backend llama-factory                         使用 LLaMA-Factory 后端
 --queue llm-finetune-vgpu                       投递到 LLM 微调队列
 --docker-image                                  训练 Pod 使用的镜像
+--reuse-last-task-id false                      强制创建新 Task，避免复用旧 Task 的 Git 仓库信息
 --store-standalone-script true                  把当前脚本存入 ClearML Task，避免训练 Pod clone 远端 Git 仓库
 --model-path /data/models/...                   Pod 内模型路径
 --dataset-path /data/datasets/...               Pod 内数据路径
@@ -726,7 +728,7 @@ python examples/training_smoke/llm_finetune_universal.py \
 
 提交成功后，本地命令通常会很快结束，真正训练会由 ClearML Agent 在 K8s 中拉起 Pod。
 
-当前通用模板默认启用 `--store-standalone-script true`，适合冒烟和单文件模板。这样 ClearML 会把当前脚本内容存到 Task 里，训练 Pod 不需要访问 GitHub 克隆代码仓库。
+当前通用模板默认启用 `--reuse-last-task-id false` 和 `--store-standalone-script true`，适合冒烟和单文件模板。这样 ClearML 会创建一个新 Task，并把当前脚本内容存到 Task 里，训练 Pod 不需要访问 GitHub 克隆代码仓库。
 
 注意：standalone script 模式适合当前这种单文件模板。如果后续模板拆成多个 Python 文件、依赖本地模块或大量配置文件，建议改为内网 Git 仓库、内部 Python 包或把模板代码打进训练镜像。
 
@@ -1068,6 +1070,22 @@ entry_point = examples/training_smoke/llm_finetune_universal.py
 
 正常情况下，重新提交新任务后，训练 Pod 不应该再依赖 GitHub clone 这个模板脚本。注意不要直接复跑旧任务，因为旧任务已经记录了 GitHub 仓库地址。请在提交机上重新执行第 10 步命令，生成一个新的 ClearML Task。
 
+如果日志里仍然出现同一个旧 Task ID，例如：
+
+```text
+Executing task id [5edda2bdb0ae4e6f9f74b4ff24888ab1]
+repository = https://github.com/7Bcoding/clearml.git
+```
+
+说明你还在执行旧任务，或者本地提交时复用了旧 Task 元数据。请确认第 10 步命令里包含：
+
+```text
+--reuse-last-task-id false
+--store-standalone-script true
+```
+
+并且是从已经更新后的 `llm_finetune_universal.py` 重新执行提交命令，而不是在 ClearML WebUI 里直接 Enqueue 旧任务。
+
 重新提交后，在 ClearML WebUI 检查：
 
 ```text
@@ -1171,6 +1189,43 @@ using '/opt/conda/bin/python3' (v3.11.11) instead
 ```
 
 这是 Python 版本回退警告。当前失败的直接原因是 Git clone 失败。
+
+### 15.10 参数被解析成 `[2, 2]`
+
+现象示例：
+
+```text
+llm_finetune_universal.py: error: argument --max-steps: invalid int value: '[2, 2]'
+```
+
+这通常说明 ClearML Task 的 `CONFIGURATION -> Args` 里某个参数被保存成了列表形式，例如：
+
+```text
+max_steps = [2, 2]
+```
+
+正常应该是：
+
+```text
+max_steps = 2
+```
+
+处理方式：
+
+```text
+1. 不要继续复跑旧 Task
+2. 使用最新的 llm_finetune_universal.py 重新提交新 Task
+3. 确认命令里包含 --reuse-last-task-id false
+4. 如果在 WebUI 里手动改参数，把 [2, 2] 改成 2
+```
+
+当前模板已经兼容这类 ClearML 参数形式。下面这些值会自动取最后一个：
+
+```text
+--max-steps "[2, 2]"                 -> 2
+--vgpu-memory "[24, 24]"             -> 24
+--learning-rate "[1e-5, 1e-5]"       -> 1e-5
+```
 
 ---
 
