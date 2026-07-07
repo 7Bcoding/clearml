@@ -690,16 +690,16 @@ python examples/training_smoke/llm_finetune_universal.py \
   --reuse-last-task-id false \
   --store-standalone-script true \
   --model-path /data/models/Qwen2.5-0.5B-Instruct \
-  --dataset-path /data/datasets/demo_sft/train.jsonl \
+  --dataset-path /data/datasets/datasets/llamafactory_demo/alpaca_zh_demo.json \
   --dataset-format alpaca \
-  --output-dir /data/output/llamafactory-sft-lora-smoke \
+  --output-dir /data/output/llamafactory-smoke-v3 \
   --train-method sft \
   --finetuning-type lora \
   --template qwen \
   --max-steps 2 \
   --per-device-train-batch-size 1 \
   --gradient-accumulation-steps 1 \
-  --learning-rate 1e-5 \
+  --learning-rate 0.00001 \
   --max-length 512 \
   --lora-rank 8 \
   --lora-alpha 16 \
