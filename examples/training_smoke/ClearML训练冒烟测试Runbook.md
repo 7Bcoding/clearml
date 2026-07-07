@@ -693,7 +693,6 @@ python examples/training_smoke/llm_finetune_universal.py \
   --dataset-path /data/datasets/llamafactory_demo/alpaca_zh_demo.json \
   --dataset-format alpaca \
   --output-dir /data/output/llamafactory-smoke-v4 \
-  --output-dir /data/output/llamafactory-smoke-v4 \
   --preprocessing-num-workers 1 \
   --train-method sft \
   --finetuning-type lora \
