@@ -165,6 +165,39 @@ def write_json(path: Path, data: Any) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
+def read_dataset_columns(dataset_path: Path) -> set[str]:
+    """Best-effort read of top-level dataset columns for json/jsonl smoke data."""
+    suffix = dataset_path.suffix.lower()
+    try:
+        if suffix == ".jsonl":
+            with dataset_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if line:
+                        sample = json.loads(line)
+                        return set(sample.keys()) if isinstance(sample, dict) else set()
+            return set()
+
+        if suffix == ".json":
+            payload = json.loads(dataset_path.read_text(encoding="utf-8"))
+            if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+                return set(payload[0].keys())
+            if isinstance(payload, dict):
+                for value in payload.values():
+                    if isinstance(value, list) and value and isinstance(value[0], dict):
+                        return set(value[0].keys())
+                return set(payload.keys())
+    except (OSError, json.JSONDecodeError):
+        return set()
+
+    return set()
+
+
+def add_existing_column(columns: dict[str, str], role: str, column_name: str, dataset_columns: set[str]) -> None:
+    if column_name and column_name in dataset_columns:
+        columns[role] = column_name
+
+
 def build_dataset_info(args: argparse.Namespace, work_dir: Path) -> tuple[str, str]:
     """Return (dataset_name, dataset_dir) for LLaMA-Factory."""
     if not args.dataset_path:
@@ -181,6 +214,7 @@ def build_dataset_info(args: argparse.Namespace, work_dir: Path) -> tuple[str, s
 
     dataset_name = args.dataset_name or "clearml_dataset"
     dataset_dir = work_dir / "llamafactory_dataset"
+    dataset_columns = read_dataset_columns(dataset_path)
     entry: dict[str, Any] = {
         # Use the absolute Pod path directly. This avoids symlink issues when
         # /data/output and /data/datasets are mounted differently.
@@ -191,9 +225,9 @@ def build_dataset_info(args: argparse.Namespace, work_dir: Path) -> tuple[str, s
     if args.dataset_format == "sharegpt":
         entry["columns"] = {
             "messages": args.messages_column,
-            "system": args.system_column,
-            "tools": args.tools_column,
         }
+        add_existing_column(entry["columns"], "system", args.system_column, dataset_columns)
+        add_existing_column(entry["columns"], "tools", args.tools_column, dataset_columns)
         if args.dataset_openai_messages:
             entry["columns"] = {"messages": args.messages_column}
             entry["tags"] = {
@@ -206,11 +240,11 @@ def build_dataset_info(args: argparse.Namespace, work_dir: Path) -> tuple[str, s
     else:
         entry["columns"] = {
             "prompt": args.prompt_column,
-            "query": args.query_column,
             "response": args.response_column,
-            "system": args.system_column,
-            "history": args.history_column,
         }
+        add_existing_column(entry["columns"], "query", args.query_column, dataset_columns)
+        add_existing_column(entry["columns"], "system", args.system_column, dataset_columns)
+        add_existing_column(entry["columns"], "history", args.history_column, dataset_columns)
 
     if args.ranking:
         entry["ranking"] = True
@@ -395,7 +429,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--eval-steps", type=str_to_int, default=1)
     parser.add_argument("--logging-steps", type=str_to_int, default=1)
     parser.add_argument("--save-total-limit", type=str_to_int, default=1)
-    parser.add_argument("--preprocessing-num-workers", type=str_to_int, default=4)
+    parser.add_argument("--preprocessing-num-workers", type=str_to_int, default=1)
     parser.add_argument("--report-to", default="none")
     parser.add_argument("--overwrite-output-dir", type=str_to_bool, default=True)
     parser.add_argument("--gradient-checkpointing", type=str_to_bool, default=True)

@@ -686,13 +686,15 @@ python examples/training_smoke/llm_finetune_universal.py \
   --queue llm-finetune-vgpu \
   --docker-image hiyouga/llamafactory:latest \
   --clearml-project training-template/llm \
-  --clearml-task-name llama-factory-sft-lora-smoke \
+  --clearml-task-name llamafactory-sft-lora-smoke-v4 \
   --reuse-last-task-id false \
   --store-standalone-script true \
   --model-path /data/models/Qwen2.5-0.5B-Instruct \
-  --dataset-path /data/datasets/datasets/llamafactory_demo/alpaca_zh_demo.json \
+  --dataset-path /data/datasets/llamafactory_demo/alpaca_zh_demo.json \
   --dataset-format alpaca \
-  --output-dir /data/output/llamafactory-smoke-v3 \
+  --output-dir /data/output/llamafactory-smoke-v4 \
+  --output-dir /data/output/llamafactory-smoke-v4 \
+  --preprocessing-num-workers 1 \
   --train-method sft \
   --finetuning-type lora \
   --template qwen \
@@ -1369,6 +1371,61 @@ Pod 内路径应该是：
 ```
 
 说明 `/data` 挂载或数据准备有问题，回到第 4.3 步重新创建数据，或检查 Agent Pod Template 的 `/data` PVC 挂载。
+
+### 15.14 数据转换时报 `KeyError: 'history'`
+
+现象示例：
+
+```text
+KeyError: 'history'
+```
+
+如果你使用的是 LLaMA-Factory 自带的：
+
+```text
+/data/datasets/llamafactory_demo/alpaca_zh_demo.json
+```
+
+这个数据集通常只有：
+
+```text
+instruction
+input
+output
+```
+
+没有：
+
+```text
+history
+system
+```
+
+旧模板生成的 `dataset_info.json` 会把 `history` 也声明进去，LLaMA-Factory 转换数据时就会找不到字段。
+
+最新模板已经修复：它会先读取数据文件里的实际字段，只把存在的可选列写进 `dataset_info.json`。例如 `alpaca_zh_demo.json` 会生成：
+
+```json
+{
+  "clearml_dataset": {
+    "file_name": "/data/datasets/llamafactory_demo/alpaca_zh_demo.json",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "response": "output",
+      "query": "input"
+    }
+  }
+}
+```
+
+处理方式：
+
+```text
+1. 使用最新的 llm_finetune_universal.py 重新提交新 Task
+2. 不要继续 Enqueue 旧 Task
+3. 冒烟阶段保持 --preprocessing-num-workers 1
+```
 
 ---
 
