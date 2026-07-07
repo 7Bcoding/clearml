@@ -685,7 +685,7 @@ python examples/training_smoke/llm_finetune_universal.py \
   --backend llama-factory \
   --queue llm-finetune-vgpu \
   --docker-image hiyouga/llamafactory:latest \
-  --clearml-project training-template/llm \
+  --clearml-project llm-train/llm-finetune \
   --clearml-task-name llamafactory-sft-lora-smoke-v4 \
   --reuse-last-task-id false \
   --store-standalone-script true \
